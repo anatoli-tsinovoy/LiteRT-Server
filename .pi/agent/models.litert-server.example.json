@@ -1,0 +1,46 @@
+{
+  "providers": {
+    "litert-server": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "$LITERT_SERVER_TOKEN",
+      "authHeader": true,
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsUsageInStreaming": false,
+        "maxTokensField": "max_tokens"
+      },
+      "models": [
+        {
+          "id": "gemma-4-e2b-it",
+          "name": "LiteRT Server Gemma 4 E2B",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 8192,
+          "maxTokens": 2048,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        },
+        {
+          "id": "gemma-4-e4b-it",
+          "name": "LiteRT Server Gemma 4 E4B",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 8192,
+          "maxTokens": 2048,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    }
+  }
+}
