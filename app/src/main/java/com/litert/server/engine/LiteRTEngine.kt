@@ -58,12 +58,11 @@ class LiteRTEngine(private val context: Context) {
                 }
 
                 val backend = if (useGpu) Backend.GPU() else Backend.CPU()
-                val visionBackend = if (useGpu) Backend.GPU() else Backend.CPU()
 
                 val config = EngineConfig(
                     modelPath = modelPath,
                     backend = backend,
-                    visionBackend = visionBackend,
+                    maxNumTokens = maxTokens,
                     cacheDir = context.cacheDir.absolutePath
                 )
                 val newEngine = Engine(config)
