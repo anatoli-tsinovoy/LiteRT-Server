@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class OaiChatRequest(
-    val model: String = "gemma-4-e2b",
+    val model: String = "local-litertlm",
     val messages: List<OaiMessage>,
     val stream: Boolean = false,
     @SerialName("max_tokens") val maxTokens: Int? = null,

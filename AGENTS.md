@@ -101,6 +101,14 @@ aapt dump permissions app/build/outputs/apk/release/litert-server-release.apk
 
 Expected requested permissions are limited to internet, foreground service, notifications, battery optimization exemption, and AndroidX's non-exported dynamic receiver permission.
 
+## Model artifact management
+
+- Built-in catalog entries live in `ModelCatalog` inside `ModelDownloadManager.kt`.
+- Custom Hugging Face models are persisted in the app's `model_registry` shared preferences.
+- Model files live under app-private external storage: `[ExternalFilesDir]/models/<model-id>/`.
+- Downloads write to `<filename>.part`, resume with HTTP Range, and rename to the final `.litertlm` only after minimum-size validation.
+- Keep arbitrary custom models constrained to Hugging Face `.litertlm` files; the app's engine path uses LiteRT-LM, not MediaPipe `.task` or generic `.tflite` loaders.
+
 ## Security and privacy notes
 
 - The embedded Ktor server binds to `127.0.0.1` only.

@@ -25,6 +25,8 @@ class LLMForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "litert_server_channel"
         const val EXTRA_MODEL_PATH = "model_path"
+        const val EXTRA_MODEL_ID = "model_id"
+        const val EXTRA_MODEL_DISPLAY_NAME = "model_display_name"
         const val EXTRA_USE_GPU = "use_gpu"
         const val ACTION_ENGINE_READY = "com.litert.server.ENGINE_READY"
         const val ACTION_ENGINE_ERROR = "com.litert.server.ENGINE_ERROR"
@@ -55,6 +57,8 @@ class LLMForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val modelPath = intent?.getStringExtra(EXTRA_MODEL_PATH) ?: return START_NOT_STICKY
         val useGpu = intent.getBooleanExtra(EXTRA_USE_GPU, true)
+        val modelId = intent.getStringExtra(EXTRA_MODEL_ID) ?: "local-litertlm"
+        val modelDisplayName = intent.getStringExtra(EXTRA_MODEL_DISPLAY_NAME) ?: modelId
 
         startAsForeground()
 
@@ -70,7 +74,7 @@ class LLMForegroundService : Service() {
                 }
 
                 val requestLog = mutableListOf<RequestLogEntry>()
-                val server = HttpApiServer(engine, apiToken) { entry ->
+                val server = HttpApiServer(engine, apiToken, modelId) { entry ->
                     synchronized(requestLog) { requestLog.add(entry) }
                 }
                 val port = server.start()
@@ -79,7 +83,7 @@ class LLMForegroundService : Service() {
                 // Expose engine to MainActivity before broadcasting ready
                 engineInstance = engine
 
-                updateNotification("LiteRT Server Running — localhost:$port")
+                updateNotification("LiteRT Server Running — $modelDisplayName on localhost:$port")
                 broadcastReady(port, engine.getBackend() == "GPU")
             } catch (e: Exception) {
                 Log.e(TAG, "Service error", e)

@@ -4,11 +4,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,7 +22,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.litert.server.data.AppStatus
-import com.litert.server.download.GemmaVariant
+import com.litert.server.download.ModelDescriptor
 
 @Composable
 fun DownloadScreen(
@@ -30,21 +33,26 @@ fun DownloadScreen(
     speedMbps: Float,
     etaSeconds: Int,
     errorMessage: String?,
-    selectedVariant: GemmaVariant,
-    onVariantSelected: (GemmaVariant) -> Unit,
+    availableModels: List<ModelDescriptor>,
+    installedModelIds: Set<String>,
+    selectedModel: ModelDescriptor,
+    onModelSelected: (ModelDescriptor) -> Unit,
+    onAddHuggingFaceModel: (String) -> Unit,
     onDownload: () -> Unit,
     onRetry: () -> Unit,
-    onPickFile: () -> Unit,
-    onUseExistingModel: (String) -> Unit = {}
+    onPickFile: () -> Unit
 ) {
+    var customModelUrl by remember { mutableStateOf("") }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(DarkBackground)
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        Spacer(modifier = Modifier.height(24.dp))
         Icon(
             Icons.Default.Download,
             contentDescription = null,
@@ -66,7 +74,6 @@ fun DownloadScreen(
         )
         Spacer(modifier = Modifier.height(32.dp))
 
-        // ── Model selector ────────────────────────────────────────────────
         if (status == AppStatus.MODEL_NOT_FOUND || status == AppStatus.DOWNLOAD_ERROR) {
             Text(
                 "Select model",
@@ -75,59 +82,60 @@ fun DownloadScreen(
                 modifier = Modifier.align(Alignment.Start)
             )
             Spacer(modifier = Modifier.height(8.dp))
-            GemmaVariant.entries.forEach { variant ->
-                val selected = variant == selectedVariant
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                        .border(
-                            width = if (selected) 1.5.dp else 1.dp,
-                            color = if (selected) GreenPrimary else Color(0xFF333333),
-                            shape = RoundedCornerShape(10.dp)
-                        )
-                        .background(
-                            color = if (selected) Color(0xFF0D2D0D) else Color(0xFF111111),
-                            shape = RoundedCornerShape(10.dp)
-                        )
-                        .clickable { onVariantSelected(variant) }
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            variant.displayName,
-                            color = if (selected) GreenPrimary else Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            variant.description,
-                            color = Color.Gray,
-                            fontSize = 11.sp
-                        )
-                    }
-                    Text(
-                        "${variant.sizeGb} GB",
-                        color = if (selected) GreenPrimary else Color.Gray,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+            availableModels.forEach { model ->
+                ModelOptionRow(
+                    model = model,
+                    selected = model.id == selectedModel.id,
+                    installed = model.id in installedModelIds,
+                    onClick = { onModelSelected(model) }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            SettingsCard {
+                Text("Add compatible Hugging Face model", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Paste a repo URL or direct .litertlm URL. Repo URLs use the first non-web .litertlm file found.",
+                    color = Color.Gray,
+                    fontSize = 11.sp
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = customModelUrl,
+                    onValueChange = { customModelUrl = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("https://huggingface.co/owner/repo") },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = GreenPrimary,
+                        unfocusedBorderColor = Color(0xFF444444),
+                        focusedLabelColor = GreenPrimary,
+                        unfocusedLabelColor = Color.Gray,
+                        cursorColor = GreenPrimary
                     )
-                    if (selected) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Icon(
-                            Icons.Default.CheckCircle,
-                            contentDescription = null,
-                            tint = GreenPrimary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = {
+                        onAddHuggingFaceModel(customModelUrl)
+                        customModelUrl = ""
+                    },
+                    enabled = customModelUrl.isNotBlank(),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenPrimary),
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Add Hugging Face model")
                 }
             }
             Spacer(modifier = Modifier.height(20.dp))
         }
 
-        // ── Status-based content ──────────────────────────────────────────
         when (status) {
             AppStatus.MODEL_NOT_FOUND -> {
                 Button(
@@ -139,7 +147,7 @@ fun DownloadScreen(
                     Icon(Icons.Default.Download, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        "Download ${selectedVariant.displayName}",
+                        "Download ${selectedModel.displayName}",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -157,7 +165,7 @@ fun DownloadScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Browse for .litertlm file", fontSize = 14.sp)
+                    Text("Import .litertlm file for selected model", fontSize = 14.sp)
                 }
             }
 
@@ -229,7 +237,7 @@ fun DownloadScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Browse for .litertlm file", fontSize = 14.sp)
+                    Text("Import .litertlm file for selected model", fontSize = 14.sp)
                 }
             }
 
@@ -240,7 +248,7 @@ fun DownloadScreen(
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    "Loading model into GPU memory...",
+                    "Loading ${selectedModel.displayName} into GPU memory...",
                     color = Color.White,
                     fontSize = 16.sp,
                     textAlign = TextAlign.Center
@@ -254,6 +262,68 @@ fun DownloadScreen(
             }
 
             else -> {}
+        }
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun ModelOptionRow(
+    model: ModelDescriptor,
+    selected: Boolean,
+    installed: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .border(
+                width = if (selected) 1.5.dp else 1.dp,
+                color = if (selected) GreenPrimary else Color(0xFF333333),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .background(
+                color = if (selected) Color(0xFF0D2D0D) else Color(0xFF111111),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    model.displayName,
+                    color = if (selected) GreenPrimary else Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (installed) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Installed", color = GreenPrimary, fontSize = 10.sp)
+                }
+            }
+            Text(
+                model.description,
+                color = Color.Gray,
+                fontSize = 11.sp
+            )
+        }
+        Text(
+            "${"%.2f".format(model.estimatedGb)} GB",
+            color = if (selected) GreenPrimary else Color.Gray,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
+        )
+        if (selected) {
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = GreenPrimary,
+                modifier = Modifier.size(18.dp)
+            )
         }
     }
 }

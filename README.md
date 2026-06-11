@@ -1,6 +1,6 @@
 # LiteRT Server — Android Studio Project
 
-A complete native Android application in Kotlin that runs Google's Gemma 4 E2B multimodal LLM
+A complete native Android application in Kotlin that runs compatible `.litertlm` models
 locally on-device via Google's LiteRT-LM SDK.
 
 ## Requirements
@@ -34,28 +34,33 @@ app/src/main/java/com/litert/server/
 1. Clone / open this folder in Android Studio
 2. Let Gradle sync (it will download ~200MB of dependencies)
 3. Build and install on your device: `./gradlew installDebug`
-4. On first launch the app will prompt you to download the model (~2.58 GB from HuggingFace)
+4. On first launch, choose a built-in LiteRT-LM model or add a compatible Hugging Face `.litertlm` URL, then download or import the model file.
 
 ## HTTP API (Ktor on localhost:8080)
 
-Once the model is loaded and the server is running:
+Once the model is loaded and the server is running, copy the per-session token from the Server tab:
 
 ```bash
-# Health check
+TOKEN="<token shown in the app>"
+
+# Health check does not require auth
 curl http://localhost:8080/health
 
 # Chat
 curl -X POST http://localhost:8080/chat \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message":"Hello!"}'
 
 # Vision (image analysis)
 curl -X POST http://localhost:8080/vision \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"imagePath":"/sdcard/DCIM/photo.jpg","prompt":"Describe this image"}'
 
 # Reset conversation history
-curl -X POST http://localhost:8080/reset
+curl -X POST http://localhost:8080/reset \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ## GPU Acceleration
@@ -64,13 +69,15 @@ The app uses the Adreno 630's OpenCL 2.0 support via LiteRT-LM's GPU backend.
 `libOpenCL.so` and `libvndksupport.so` are declared in the manifest.
 If GPU init fails, the engine automatically falls back to CPU.
 
-## Model
+## Models
 
-- **Model**: Gemma 4 E2B Instruction-tuned (LiteRT format)
-- **URL**: `https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm`
-- **Size**: ~2.58 GB
-- **Saved to**: `[ExternalFilesDir]/gemma4.litertlm`
-- **Resume**: Partial downloads are resumed automatically using HTTP Range headers
+- **Built-ins**:
+  - Gemma 4 E2B: `https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm`
+  - Gemma 4 E4B: `https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm`
+- **Custom models**: paste a compatible Hugging Face repo URL or direct `.litertlm` URL in the Download screen.
+- **Storage**: models are stored in app-private external storage under `[ExternalFilesDir]/models/<model-id>/`.
+- **Safety**: downloads write to `*.part`, resume with HTTP Range, and atomically rename only after minimum-size validation.
+- **Management**: Settings lists installed models with size/path, lets you switch models, delete one model, or delete all models/cache.
 
 ## Android 15 Notes
 

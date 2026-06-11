@@ -44,6 +44,7 @@ import kotlinx.serialization.json.Json
 class HttpApiServer(
     private val engine: LiteRTEngine,
     private val apiToken: String,
+    private val modelId: String,
     private val onRequest: (RequestLogEntry) -> Unit
 ) {
     private var server: ApplicationEngine? = null
@@ -80,7 +81,7 @@ class HttpApiServer(
                             call.respond(
                                 HealthResponse(
                                     status = "ok",
-                                    model = "gemma-4-E2B",
+                                    model = modelId,
                                     gpu = engine.getBackend() == "GPU",
                                     ready = engine.isReady
                                 )
@@ -95,7 +96,7 @@ class HttpApiServer(
                                 call.respond(
                                     OaiModelsResponse(
                                         data = listOf(
-                                            OaiModelEntry(id = "gemma-4-e2b")
+                                            OaiModelEntry(id = modelId)
                                         )
                                     )
                                 )
@@ -126,7 +127,7 @@ class HttpApiServer(
                                         val firstChunk = OaiStreamChunk(
                                             id = reqId,
                                             created = System.currentTimeMillis() / 1000,
-                                            model = "gemma-4-e2b",
+                                            model = modelId,
                                             choices = listOf(
                                                 OaiStreamChoice(
                                                     index = 0,
@@ -141,7 +142,7 @@ class HttpApiServer(
                                             val chunk = OaiStreamChunk(
                                                 id = reqId,
                                                 created = System.currentTimeMillis() / 1000,
-                                                model = "gemma-4-e2b",
+                                                model = modelId,
                                                 choices = listOf(
                                                     OaiStreamChoice(
                                                         index = 0,
@@ -157,7 +158,7 @@ class HttpApiServer(
                                         val stopChunk = OaiStreamChunk(
                                             id = reqId,
                                             created = System.currentTimeMillis() / 1000,
-                                            model = "gemma-4-e2b",
+                                            model = modelId,
                                             choices = listOf(
                                                 OaiStreamChoice(
                                                     index = 0,
@@ -181,7 +182,7 @@ class HttpApiServer(
                                         OaiChatResponse(
                                             id = "chatcmpl-${System.currentTimeMillis()}",
                                             created = System.currentTimeMillis() / 1000,
-                                            model = "gemma-4-e2b",
+                                            model = modelId,
                                             choices = listOf(
                                                 OaiChoice(
                                                     index = 0,

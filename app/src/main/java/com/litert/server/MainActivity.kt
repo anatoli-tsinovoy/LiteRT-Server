@@ -32,7 +32,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.litert.server.data.*
-import com.litert.server.download.GemmaVariant
+import com.litert.server.download.ModelArtifact
+import com.litert.server.download.ModelDescriptor
 import com.litert.server.download.ModelDownloadManager
 import com.litert.server.service.LLMForegroundService
 import com.litert.server.ui.*
@@ -52,7 +53,9 @@ class MainActivity : ComponentActivity() {
     private var visionResult by mutableStateOf("")
     private var isAnalyzing by mutableStateOf(false)
     private var selectedTab by mutableIntStateOf(0)
-    private var selectedVariant by mutableStateOf(GemmaVariant.E2B)
+    private var availableModels by mutableStateOf(emptyList<ModelDescriptor>())
+    private var installedModels by mutableStateOf(emptyList<ModelArtifact>())
+    private var selectedModel by mutableStateOf<com.litert.server.download.ModelDescriptor?>(null)
 
     // Holds reference to the engine once the service boots it.
     // We bind to the service via a shared singleton so the UI can call it directly.
@@ -68,12 +71,11 @@ class MainActivity : ComponentActivity() {
             try {
                 val inputStream = contentResolver.openInputStream(uri)
                     ?: throw Exception("Cannot open file")
-                val dest = File(downloadManager.getModelPath())
-                dest.parentFile?.mkdirs()
-                inputStream.use { ins ->
-                    dest.outputStream().use { out -> ins.copyTo(out) }
+                downloadManager.importActiveModel(inputStream)
+                withContext(Dispatchers.Main) {
+                    refreshModels()
+                    startEngineService()
                 }
-                withContext(Dispatchers.Main) { startEngineService() }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     appState = appState.copy(
@@ -119,6 +121,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         downloadManager = ModelDownloadManager(this)
+        refreshModels()
 
         val filter = IntentFilter().apply {
             addAction(LLMForegroundService.ACTION_ENGINE_READY)
@@ -156,12 +159,11 @@ class MainActivity : ComponentActivity() {
                     speedMbps = appState.downloadSpeedMbps,
                     etaSeconds = appState.etaSeconds,
                     errorMessage = appState.errorMessage,
-                    selectedVariant = selectedVariant,
-                    onVariantSelected = { variant ->
-                        selectedVariant = variant
-                        downloadManager.setVariant(variant)
-                        checkModelAndUpdateState()
-                    },
+                    availableModels = availableModels,
+                    installedModelIds = installedModels.mapTo(mutableSetOf()) { it.model.id },
+                    selectedModel = selectedModel ?: downloadManager.getActiveModel(),
+                    onModelSelected = ::selectModel,
+                    onAddHuggingFaceModel = ::addHuggingFaceModel,
                     onDownload = ::startDownload,
                     onRetry = ::startDownload,
                     onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) }
@@ -235,9 +237,12 @@ class MainActivity : ComponentActivity() {
                         onToggle = ::toggleServer
                     )
                     3 -> SettingsScreen(
-                        modelPath = downloadManager.getModelPath(),
+                        selectedModel = selectedModel ?: downloadManager.getActiveModel(),
+                        installedModels = installedModels,
                         isGpu = appState.isGpuBackend,
-                        onClearCache = { downloadManager.deleteModel(); checkModelAndUpdateState() }
+                        onSelectModel = ::selectModel,
+                        onDeleteModel = ::deleteModel,
+                        onDeleteAllModels = ::deleteAllModels
                     )
                 }
             }
@@ -330,11 +335,62 @@ class MainActivity : ComponentActivity() {
     }
 
     // ── Lifecycle helpers ───────────────────────────────────────────────
+    private fun refreshModels() {
+        availableModels = downloadManager.getAvailableModels()
+        installedModels = downloadManager.getInstalledModels()
+        selectedModel = downloadManager.getActiveModel()
+    }
+
+    private fun selectModel(model: ModelDescriptor) {
+        val changed = selectedModel?.id != model.id
+        if (changed) stopEngineService()
+        downloadManager.setModel(model)
+        refreshModels()
+        checkModelAndUpdateState()
+    }
+
+    private fun addHuggingFaceModel(input: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val model = downloadManager.addCustomHuggingFaceModel(input)
+                withContext(Dispatchers.Main) {
+                    stopEngineService()
+                    refreshModels()
+                    selectedModel = model
+                    appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, errorMessage = null)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    appState = appState.copy(
+                        status = AppStatus.DOWNLOAD_ERROR,
+                        errorMessage = e.message ?: "Could not add Hugging Face model"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun deleteModel(model: ModelDescriptor) {
+        val deletingActiveModel = selectedModel?.id == model.id
+        if (deletingActiveModel) stopEngineService()
+        downloadManager.deleteModel(model.id)
+        refreshModels()
+        checkModelAndUpdateState()
+    }
+
+    private fun deleteAllModels() {
+        stopEngineService()
+        downloadManager.deleteAllModels()
+        refreshModels()
+        appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, errorMessage = null)
+    }
+
     private fun checkModelAndUpdateState() {
+        refreshModels()
         if (downloadManager.isModelDownloaded()) {
             startEngineService()
         } else {
-            appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND)
+            appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, isServerRunning = false, engineReady = false)
         }
     }
 
@@ -356,7 +412,10 @@ class MainActivity : ComponentActivity() {
                         downloadSpeedMbps = progress.speedMbps,
                         etaSeconds = progress.etaSeconds
                     )
-                    if (progress.isDone) startEngineService()
+                    if (progress.isDone) {
+                        refreshModels()
+                        startEngineService()
+                    }
                 }
         }
     }
@@ -365,16 +424,22 @@ class MainActivity : ComponentActivity() {
         appState = appState.copy(status = AppStatus.INITIALIZING)
         val intent = Intent(this, LLMForegroundService::class.java).apply {
             putExtra(LLMForegroundService.EXTRA_MODEL_PATH, downloadManager.getModelPath())
+            putExtra(LLMForegroundService.EXTRA_MODEL_ID, downloadManager.getActiveModel().id)
+            putExtra(LLMForegroundService.EXTRA_MODEL_DISPLAY_NAME, downloadManager.getActiveModel().displayName)
             putExtra(LLMForegroundService.EXTRA_USE_GPU, true)
         }
         startForegroundService(intent)
     }
 
+    private fun stopEngineService() {
+        stopService(Intent(this, LLMForegroundService::class.java))
+        liteRTEngine = null
+        appState = appState.copy(isServerRunning = false, engineReady = false, apiToken = "")
+    }
+
     private fun toggleServer() {
         if (appState.isServerRunning) {
-            stopService(Intent(this, LLMForegroundService::class.java))
-            liteRTEngine = null
-            appState = appState.copy(isServerRunning = false, engineReady = false)
+            stopEngineService()
         } else {
             startEngineService()
         }

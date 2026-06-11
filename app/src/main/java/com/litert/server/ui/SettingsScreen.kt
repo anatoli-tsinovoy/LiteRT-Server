@@ -1,11 +1,14 @@
 package com.litert.server.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -15,17 +18,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.litert.server.download.ModelArtifact
+import com.litert.server.download.ModelDescriptor
 
 @Composable
 fun SettingsScreen(
-    modelPath: String,
+    selectedModel: ModelDescriptor,
+    installedModels: List<ModelArtifact>,
     isGpu: Boolean,
-    onClearCache: () -> Unit
+    onSelectModel: (ModelDescriptor) -> Unit,
+    onDeleteModel: (ModelDescriptor) -> Unit,
+    onDeleteAllModels: () -> Unit
 ) {
     var temperature by remember { mutableFloatStateOf(0.7f) }
     var maxTokens by remember { mutableFloatStateOf(1024f) }
     var useGpu by remember { mutableStateOf(isGpu) }
-    var showDeleteDialog by remember { mutableStateOf(false) }
+    var modelToDelete by remember { mutableStateOf<ModelDescriptor?>(null) }
+    var showDeleteAllDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -38,9 +47,30 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         SettingsCard {
-            Text("Model Path", color = Color.Gray, fontSize = 12.sp)
+            Text("Active Model", color = Color.Gray, fontSize = 12.sp)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(modelPath, color = Color.White, fontSize = 13.sp)
+            Text(selectedModel.displayName, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(selectedModel.id, color = Color.Gray, fontSize = 12.sp)
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        SettingsCard {
+            Text("Installed Models", color = Color.White, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(8.dp))
+            if (installedModels.isEmpty()) {
+                Text("No installed models yet.", color = Color.Gray, fontSize = 13.sp)
+            } else {
+                installedModels.forEach { artifact ->
+                    InstalledModelRow(
+                        artifact = artifact,
+                        selected = artifact.model.id == selectedModel.id,
+                        onSelect = { onSelectModel(artifact.model) },
+                        onDelete = { modelToDelete = artifact.model }
+                    )
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -54,7 +84,7 @@ fun SettingsScreen(
                 Column {
                     Text("GPU Acceleration", color = Color.White, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Adreno 630 / OpenCL 2.0",
+                        "LiteRT-LM GPU backend with CPU fallback",
                         color = Color.Gray,
                         fontSize = 12.sp
                     )
@@ -123,7 +153,8 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(12.dp))
 
         OutlinedButton(
-            onClick = { showDeleteDialog = true },
+            onClick = { showDeleteAllDialog = true },
+            enabled = installedModels.isNotEmpty(),
             modifier = Modifier.fillMaxWidth().height(48.dp),
             border = ButtonDefaults.outlinedButtonBorder.copy(),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
@@ -131,29 +162,88 @@ fun SettingsScreen(
         ) {
             Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFEF4444))
             Spacer(modifier = Modifier.width(8.dp))
-            Text("Delete Model & Cache")
+            Text("Delete All Models & Cache")
         }
 
         Spacer(modifier = Modifier.height(24.dp))
         Text("LiteRT Server v1.0", color = Color.Gray, fontSize = 12.sp)
-        Text("Gemma 4 E2B · LiteRT-LM SDK 0.10.0", color = Color.Gray, fontSize = 12.sp)
+        Text("LiteRT-LM SDK 0.10.0", color = Color.Gray, fontSize = 12.sp)
     }
 
-    if (showDeleteDialog) {
+    modelToDelete?.let { model ->
         AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            title = { Text("Delete Model?") },
-            text = { Text("This will delete the downloaded model (2.58 GB) and require a re-download.") },
+            onDismissRequest = { modelToDelete = null },
+            title = { Text("Delete ${model.displayName}?") },
+            text = { Text("This deletes the local model artifact. It can be downloaded or imported again later.") },
             confirmButton = {
                 TextButton(onClick = {
-                    onClearCache()
-                    showDeleteDialog = false
+                    onDeleteModel(model)
+                    modelToDelete = null
                 }) { Text("Delete", color = Color(0xFFEF4444)) }
             },
             dismissButton = {
-                TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { modelToDelete = null }) { Text("Cancel") }
             }
         )
+    }
+
+    if (showDeleteAllDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteAllDialog = false },
+            title = { Text("Delete all models?") },
+            text = { Text("This deletes every downloaded model artifact and app cache files.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteAllModels()
+                    showDeleteAllDialog = false
+                }) { Text("Delete All", color = Color(0xFFEF4444)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteAllDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun InstalledModelRow(
+    artifact: ModelArtifact,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp)
+            .border(
+                width = if (selected) 1.5.dp else 1.dp,
+                color = if (selected) GreenPrimary else Color(0xFF333333),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .background(
+                color = if (selected) Color(0xFF0D2D0D) else Color(0xFF111111),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .clickable(onClick = onSelect)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(artifact.model.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                if (selected) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(Icons.Default.CheckCircle, contentDescription = null, tint = GreenPrimary, modifier = Modifier.size(16.dp))
+                }
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text("${"%.1f".format(artifact.sizeMb)} MB", color = Color.Gray, fontSize = 12.sp)
+            Text(artifact.path, color = Color.Gray, fontSize = 10.sp)
+        }
+        IconButton(onClick = onDelete) {
+            Icon(Icons.Default.Delete, contentDescription = "Delete model", tint = Color(0xFFEF4444))
+        }
     }
 }
 
