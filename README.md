@@ -77,7 +77,7 @@ If GPU init fails, the engine automatically falls back to CPU.
 - **Custom models**: paste a compatible Hugging Face repo URL or direct `.litertlm` URL in the Download screen.
 - **Hugging Face auth**: Download and Settings screens accept an `hf_...` access token. The app stores it encrypted with Android Keystore and sends it only to Hugging Face API/download requests.
 - **Storage**: models are stored in app-private external storage under `[ExternalFilesDir]/models/<model-id>/`.
-- **Safety**: downloads write to `*.part`, resume with HTTP Range, and atomically rename only after minimum-size validation.
+- **Safety/performance**: downloads authenticate to Hugging Face when a token is saved, use parallel HTTP Range segments when the resolver supports ranges, write partial data as `*.part*`, resume interrupted work, and atomically rename only after minimum-size validation.
 - **Management**: Settings lists installed models with size/path, lets you switch models, delete one model, or delete all models/cache.
 
 ## Android 15 Notes

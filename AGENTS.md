@@ -107,7 +107,7 @@ Expected requested permissions are limited to internet, foreground service, noti
 - Custom Hugging Face models are persisted in the app's `model_registry` shared preferences.
 - Optional Hugging Face access tokens are encrypted with Android Keystore before being stored in `model_registry`; authenticated requests must only target Hugging Face API/download URLs.
 - Model files live under app-private external storage: `[ExternalFilesDir]/models/<model-id>/`.
-- Downloads write to `<filename>.part`, resume with HTTP Range, and rename to the final `.litertlm` only after minimum-size validation.
+- Downloads authenticate to Hugging Face when a token is saved, use parallel HTTP Range segments when the resolver supports ranges, write to `<filename>.part*`, resume interrupted work, and rename to the final `.litertlm` only after minimum-size validation.
 - Keep arbitrary custom models constrained to Hugging Face `.litertlm` files; the app's engine path uses LiteRT-LM, not MediaPipe `.task` or generic `.tflite` loaders.
 
 ## Security and privacy notes

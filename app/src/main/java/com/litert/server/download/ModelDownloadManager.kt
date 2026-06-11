@@ -3,6 +3,7 @@ package com.litert.server.download
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.SerialName
@@ -15,7 +16,11 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.URI
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -33,6 +38,8 @@ private const val HF_TOKEN_KEY_ALIAS = "litert_server_hugging_face_token"
 private const val ANDROID_KEYSTORE = "AndroidKeyStore"
 private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
 private const val GCM_TAG_BITS = 128
+private const val PARALLEL_DOWNLOAD_SEGMENTS = 4
+private const val PARALLEL_DOWNLOAD_MIN_BYTES = 64L * 1024L * 1024L
 
 data class DownloadProgress(
     val progressPercent: Float,
@@ -231,66 +238,26 @@ class ModelDownloadManager(private val context: Context) {
             return@flow
         }
 
-        var existingBytes = if (partialFile.exists()) partialFile.length() else 0L
-        val requestBuilder = authenticatedRequestBuilder(model.downloadUrl)
-        if (existingBytes > 0L) {
-            requestBuilder.header("Range", "bytes=$existingBytes-")
-        }
-
-        val response = client.newCall(requestBuilder.build()).execute()
-        if (!response.isSuccessful && response.code != 206) {
-            throw IllegalStateException("Download failed: HTTP ${response.code} — ${response.message}")
-        }
-
-        if (existingBytes > 0L && response.code != 206) {
-            existingBytes = 0L
-            partialFile.delete()
-        }
-
-        val totalBytes = totalBytes(response.code, response.header("Content-Range"), response.body?.contentLength(), existingBytes, model)
-        val remainingBytes = (totalBytes - existingBytes).coerceAtLeast(0L)
+        val metadata = fetchDownloadMetadata(model)
+        val totalBytes = metadata.totalBytes
         val usableSpace = finalFile.parentFile?.usableSpace ?: 0L
+        val alreadyDownloadedBytes = if (partialFile.exists()) {
+            partialFile.length()
+        } else {
+            segmentFiles(model).sumOf { if (it.exists()) it.length() else 0L }
+        }
+        val remainingBytes = (totalBytes - alreadyDownloadedBytes).coerceAtLeast(0L)
         if (usableSpace in 1 until (remainingBytes + FREE_SPACE_HEADROOM_BYTES)) {
             throw IllegalStateException(
                 "Not enough free space. Need about ${formatGb(remainingBytes + FREE_SPACE_HEADROOM_BYTES)} GB available."
             )
         }
 
-        val body = response.body ?: throw IllegalStateException("Empty response body")
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        var downloadedBytes = existingBytes
-        var lastSpeedTime = System.currentTimeMillis()
-        var lastSpeedBytes = downloadedBytes
-
-        FileOutputStream(partialFile, existingBytes > 0L).use { outputStream ->
-            body.byteStream().use { inputStream ->
-                while (true) {
-                    val read = inputStream.read(buffer)
-                    if (read == -1) break
-                    outputStream.write(buffer, 0, read)
-                    downloadedBytes += read
-
-                    val now = System.currentTimeMillis()
-                    val elapsed = now - lastSpeedTime
-                    if (elapsed >= 1000) {
-                        val bytesSinceLastCheck = downloadedBytes - lastSpeedBytes
-                        val speedMbps = (bytesSinceLastCheck / 1024f / 1024f) / (elapsed / 1000f)
-                        val remaining = totalBytes - downloadedBytes
-                        val etaSec = if (speedMbps > 0f) (remaining / 1024 / 1024 / speedMbps).toInt() else 0
-                        emit(
-                            DownloadProgress(
-                                progressPercent = (downloadedBytes.toFloat() / totalBytes).coerceIn(0f, 1f),
-                                downloadedMb = downloadedBytes / 1024f / 1024f,
-                                totalMb = totalBytes / 1024f / 1024f,
-                                speedMbps = speedMbps,
-                                etaSeconds = etaSec.coerceAtLeast(0)
-                            )
-                        )
-                        lastSpeedTime = now
-                        lastSpeedBytes = downloadedBytes
-                    }
-                }
-            }
+        if (metadata.supportsRanges && !partialFile.exists() && totalBytes >= PARALLEL_DOWNLOAD_MIN_BYTES) {
+            downloadParallelSegments(model, partialFile, totalBytes)
+        } else {
+            cleanupSegmentFiles(model)
+            downloadSingleStream(model, partialFile, totalBytes)
         }
 
         if (partialFile.length() < model.minValidBytes) {
@@ -316,16 +283,223 @@ class ModelDownloadManager(private val context: Context) {
         )
     }.flowOn(Dispatchers.IO)
 
+    private data class DownloadMetadata(
+        val totalBytes: Long,
+        val supportsRanges: Boolean
+    )
+
+    private fun fetchDownloadMetadata(model: ModelDescriptor): DownloadMetadata {
+        val request = authenticatedRequestBuilder(model.downloadUrl)
+            .header("Range", "bytes=0-0")
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful && response.code != 206) {
+                throw IllegalStateException("Download failed: HTTP ${response.code} — ${response.message}")
+            }
+            val totalBytes = totalBytes(
+                response.code,
+                response.header("Content-Range"),
+                response.body?.contentLength(),
+                0L,
+                model
+            )
+            return DownloadMetadata(
+                totalBytes = totalBytes,
+                supportsRanges = response.code == 206 && response.header("Content-Range")?.contains('/') == true
+            )
+        }
+    }
+
+    private suspend fun FlowCollector<DownloadProgress>.downloadSingleStream(
+        model: ModelDescriptor,
+        partialFile: File,
+        totalBytes: Long
+    ) {
+        var existingBytes = if (partialFile.exists()) partialFile.length() else 0L
+        val requestBuilder = authenticatedRequestBuilder(model.downloadUrl)
+        if (existingBytes > 0L) {
+            requestBuilder.header("Range", "bytes=$existingBytes-")
+        }
+
+        client.newCall(requestBuilder.build()).execute().use { response ->
+            if (!response.isSuccessful && response.code != 206) {
+                throw IllegalStateException("Download failed: HTTP ${response.code} — ${response.message}")
+            }
+
+            if (existingBytes > 0L && response.code != 206) {
+                existingBytes = 0L
+                partialFile.delete()
+            }
+
+            val body = response.body ?: throw IllegalStateException("Empty response body")
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var downloadedBytes = existingBytes
+            var lastSpeedTime = System.currentTimeMillis()
+            var lastSpeedBytes = downloadedBytes
+
+            FileOutputStream(partialFile, existingBytes > 0L).use { outputStream ->
+                body.byteStream().use { inputStream ->
+                    while (true) {
+                        val read = inputStream.read(buffer)
+                        if (read == -1) break
+                        outputStream.write(buffer, 0, read)
+                        downloadedBytes += read
+
+                        val now = System.currentTimeMillis()
+                        val elapsed = now - lastSpeedTime
+                        if (elapsed >= 1000) {
+                            val speedMbps = speedMbps(downloadedBytes - lastSpeedBytes, elapsed)
+                            emitProgress(downloadedBytes, totalBytes, speedMbps)
+                            lastSpeedTime = now
+                            lastSpeedBytes = downloadedBytes
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun FlowCollector<DownloadProgress>.downloadParallelSegments(
+        model: ModelDescriptor,
+        partialFile: File,
+        totalBytes: Long
+    ) {
+        val segments = downloadSegments(model, totalBytes)
+        val downloadedBytes = AtomicLong(segments.sumOf { it.file.length().coerceAtMost(it.length) })
+        val error = AtomicReference<Throwable?>(null)
+        val latch = CountDownLatch(segments.size)
+        val executor = Executors.newFixedThreadPool(segments.size.coerceAtLeast(1))
+
+        segments.forEach { segment ->
+            executor.execute {
+                try {
+                    downloadSegment(model, segment, downloadedBytes)
+                } catch (throwable: Throwable) {
+                    error.compareAndSet(null, throwable)
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+
+        var lastSpeedTime = System.currentTimeMillis()
+        var lastSpeedBytes = downloadedBytes.get()
+        try {
+            while (latch.count > 0L) {
+                Thread.sleep(1000)
+                error.get()?.let { throw it }
+                val now = System.currentTimeMillis()
+                val currentBytes = downloadedBytes.get()
+                val elapsed = now - lastSpeedTime
+                val speedMbps = speedMbps(currentBytes - lastSpeedBytes, elapsed)
+                emitProgress(currentBytes, totalBytes, speedMbps)
+                lastSpeedTime = now
+                lastSpeedBytes = currentBytes
+            }
+            error.get()?.let { throw it }
+        } finally {
+            executor.shutdownNow()
+        }
+
+        partialFile.delete()
+        FileOutputStream(partialFile, false).use { output ->
+            segments.sortedBy { it.start }.forEach { segment ->
+                require(segment.file.length() == segment.length) {
+                    "Incomplete download segment for ${model.displayName}"
+                }
+                segment.file.inputStream().use { input -> input.copyTo(output) }
+                segment.file.delete()
+            }
+        }
+    }
+
+    private data class DownloadSegment(
+        val index: Int,
+        val start: Long,
+        val endInclusive: Long,
+        val file: File
+    ) {
+        val length: Long = endInclusive - start + 1L
+    }
+
+    private fun downloadSegments(model: ModelDescriptor, totalBytes: Long): List<DownloadSegment> {
+        val segmentCount = PARALLEL_DOWNLOAD_SEGMENTS.coerceAtMost((totalBytes / PARALLEL_DOWNLOAD_MIN_BYTES).coerceAtLeast(1L).toInt())
+        val segmentSize = (totalBytes + segmentCount - 1L) / segmentCount
+        return (0 until segmentCount).mapNotNull { index ->
+            val start = index * segmentSize
+            if (start >= totalBytes) return@mapNotNull null
+            val end = minOf(totalBytes - 1L, start + segmentSize - 1L)
+            DownloadSegment(index, start, end, segmentFile(model, index))
+        }
+    }
+
+    private fun downloadSegment(
+        model: ModelDescriptor,
+        segment: DownloadSegment,
+        downloadedBytes: AtomicLong
+    ) {
+        if (segment.file.exists() && segment.file.length() > segment.length) {
+            downloadedBytes.addAndGet(-segment.length)
+            segment.file.delete()
+        }
+        val existingBytes = if (segment.file.exists()) segment.file.length() else 0L
+        if (existingBytes == segment.length) return
+
+        val request = authenticatedRequestBuilder(model.downloadUrl)
+            .header("Range", "bytes=${segment.start + existingBytes}-${segment.endInclusive}")
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (response.code != 206) {
+                throw IllegalStateException("Download segment ${segment.index + 1} failed: HTTP ${response.code}")
+            }
+            val body = response.body ?: throw IllegalStateException("Empty response body")
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            FileOutputStream(segment.file, existingBytes > 0L).use { output ->
+                body.byteStream().use { input ->
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        output.write(buffer, 0, read)
+                        downloadedBytes.addAndGet(read.toLong())
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun FlowCollector<DownloadProgress>.emitProgress(
+        downloadedBytes: Long,
+        totalBytes: Long,
+        speedMbps: Float
+    ) {
+        val remaining = totalBytes - downloadedBytes
+        val etaSec = if (speedMbps > 0f) (remaining / 1024 / 1024 / speedMbps).toInt() else 0
+        emit(
+            DownloadProgress(
+                progressPercent = (downloadedBytes.toFloat() / totalBytes).coerceIn(0f, 1f),
+                downloadedMb = downloadedBytes / 1024f / 1024f,
+                totalMb = totalBytes / 1024f / 1024f,
+                speedMbps = speedMbps,
+                etaSeconds = etaSec.coerceAtLeast(0)
+            )
+        )
+    }
+
+    private fun speedMbps(bytes: Long, elapsedMillis: Long): Float =
+        if (elapsedMillis > 0L) (bytes / 1024f / 1024f) / (elapsedMillis / 1000f) else 0f
+
     fun deleteModel(modelId: String = getActiveModel().id) {
         val model = getAvailableModels().firstOrNull { it.id == modelId } ?: return
         modelFile(model).delete()
         partialFile(model).delete()
+        cleanupSegmentFiles(model)
     }
 
     fun deleteAllModels() {
         getAvailableModels().forEach { model ->
             modelFile(model).delete()
             partialFile(model).delete()
+            cleanupSegmentFiles(model)
         }
         context.cacheDir.deleteRecursively()
         context.cacheDir.mkdirs()
@@ -339,9 +513,14 @@ class ModelDownloadManager(private val context: Context) {
             model = model,
             path = finalFile.absolutePath,
             sizeBytes = sizeBytes,
-            partialBytes = if (partialFile.exists()) partialFile.length() else 0L,
+            partialBytes = partialBytes(model, partialFile),
             isInstalled = finalFile.exists() && sizeBytes >= model.minValidBytes
         )
+    }
+
+    private fun partialBytes(model: ModelDescriptor, partialFile: File): Long {
+        if (partialFile.exists()) return partialFile.length()
+        return segmentFiles(model).sumOf { if (it.exists()) it.length() else 0L }
     }
 
     private fun resolveHuggingFaceModel(input: String): ModelDescriptor {
@@ -423,6 +602,16 @@ class ModelDownloadManager(private val context: Context) {
     private fun modelFile(model: ModelDescriptor): File = File(modelDirectory(model), model.filename)
 
     private fun partialFile(model: ModelDescriptor): File = File(modelDirectory(model), "${model.filename}.part")
+    private fun segmentFile(model: ModelDescriptor, index: Int): File =
+        File(modelDirectory(model), "${model.filename}.part.$index")
+
+    private fun segmentFiles(model: ModelDescriptor): List<File> =
+        (0 until PARALLEL_DOWNLOAD_SEGMENTS).map { segmentFile(model, it) }
+
+    private fun cleanupSegmentFiles(model: ModelDescriptor) {
+        segmentFiles(model).forEach { it.delete() }
+    }
+
 
     private fun modelDirectory(model: ModelDescriptor): File = File(context.getExternalFilesDir("models"), sanitizeFilename(model.id))
 
