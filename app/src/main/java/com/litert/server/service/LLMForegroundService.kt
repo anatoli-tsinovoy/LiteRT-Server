@@ -69,7 +69,7 @@ class LLMForegroundService : Service() {
 
                 val success = engine.initialize(modelPath, useGpu)
                 if (!success) {
-                    broadcastError("Failed to initialize LLM engine")
+                    broadcastError(engine.getLastInitializationError() ?: "Failed to initialize LLM engine")
                     return@launch
                 }
 
@@ -85,9 +85,9 @@ class LLMForegroundService : Service() {
 
                 updateNotification("LiteRT Server Running — $modelDisplayName on localhost:$port")
                 broadcastReady(port, engine.getBackend() == "GPU")
-            } catch (e: Exception) {
-                Log.e(TAG, "Service error", e)
-                broadcastError(e.message ?: "Unknown error")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Service error", t)
+                broadcastError(t.message ?: "Unknown service error: ${t.javaClass.name}")
             }
         }
 

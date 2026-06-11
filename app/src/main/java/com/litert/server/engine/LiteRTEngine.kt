@@ -18,9 +18,11 @@ class LiteRTEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "LiteRTEngine"
+        private const val MIN_EXPECTED_MODEL_BYTES = 100_000_000L
     }
 
     private var engine: Engine? = null
+    private var lastInitializationError: String? = null
     private var conversation: com.google.ai.edge.litertlm.Conversation? = null
     private var currentBackend: String = "GPU"
     private var currentSamplerConfig: SamplerConfig = SamplerConfig(
@@ -41,7 +43,20 @@ class LiteRTEngine(private val context: Context) {
         topP: Double = 0.9
     ): Boolean {
         return withContext(Dispatchers.IO) {
+            val modelFile = java.io.File(modelPath)
+            val modelDetails = modelFile.diagnosticSummary()
             try {
+                lastInitializationError = null
+                if (!modelFile.isFile) {
+                    throw IllegalArgumentException("Model file does not exist or is not a regular file: $modelDetails")
+                }
+                if (!modelFile.canRead()) {
+                    throw IllegalArgumentException("Model file is not readable: $modelDetails")
+                }
+                if (modelFile.length() < MIN_EXPECTED_MODEL_BYTES) {
+                    throw IllegalArgumentException("Model file is too small to be a valid .litertlm artifact: $modelDetails")
+                }
+
                 val backend = if (useGpu) Backend.GPU() else Backend.CPU()
                 val visionBackend = if (useGpu) Backend.GPU() else Backend.CPU()
 
@@ -61,19 +76,42 @@ class LiteRTEngine(private val context: Context) {
                 conversation = conv
                 currentBackend = if (useGpu) "GPU" else "CPU"
                 isReady = true
-                Log.i(TAG, "Engine initialized with $currentBackend backend")
+                Log.i(TAG, "Engine initialized with $currentBackend backend for $modelDetails")
                 true
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to initialize with ${if (useGpu) "GPU" else "CPU"} backend", e)
+            } catch (t: Throwable) {
+                val backendName = if (useGpu) "GPU" else "CPU"
+                val diagnostic = buildInitializationDiagnostic(backendName, modelDetails, t)
+                Log.e(TAG, diagnostic, t)
                 if (useGpu) {
-                    Log.w(TAG, "Falling back to CPU backend...")
+                    Log.w(TAG, "Falling back to CPU backend after GPU initialization failure")
                     initialize(modelPath, useGpu = false, temperature, maxTokens, topK, topP)
                 } else {
+                    lastInitializationError = diagnostic
                     isReady = false
                     false
                 }
             }
         }
+    }
+
+    fun getLastInitializationError(): String? = lastInitializationError
+
+    private fun java.io.File.diagnosticSummary(): String =
+        "path=$absolutePath, exists=${exists()}, isFile=$isFile, canRead=${canRead()}, " +
+            "bytes=${if (exists()) length() else 0}, usableSpace=${parentFile?.usableSpace ?: 0}, " +
+            "sdk=${android.os.Build.VERSION.SDK_INT}, device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, " +
+            "abi=${android.os.Build.SUPPORTED_ABIS.joinToString()}"
+
+    private fun buildInitializationDiagnostic(
+        backendName: String,
+        modelDetails: String,
+        throwable: Throwable
+    ): String {
+        val root = generateSequence(throwable) { it.cause }.last()
+        return "Failed to initialize LiteRT-LM engine with $backendName backend. " +
+            "Model diagnostics: $modelDetails. " +
+            "Error: ${throwable.javaClass.name}: ${throwable.message ?: "no message"}. " +
+            "Root cause: ${root.javaClass.name}: ${root.message ?: "no message"}"
     }
 
     private fun createNewConversation(
