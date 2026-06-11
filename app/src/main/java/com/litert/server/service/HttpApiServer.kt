@@ -16,6 +16,8 @@ import com.litert.server.data.OaiStreamChoice
 import com.litert.server.data.RequestLogEntry
 import com.litert.server.data.VisionRequest
 import com.litert.server.engine.LiteRTEngine
+import io.ktor.http.HttpHeaders
+import io.ktor.server.application.ApplicationCall
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -27,6 +29,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.request.authorization
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondTextWriter
@@ -40,6 +43,7 @@ import kotlinx.serialization.json.Json
 
 class HttpApiServer(
     private val engine: LiteRTEngine,
+    private val apiToken: String,
     private val onRequest: (RequestLogEntry) -> Unit
 ) {
     private var server: ApplicationEngine? = null
@@ -51,12 +55,14 @@ class HttpApiServer(
     fun start(): Int {
         for (tryPort in 8080..8082) {
             try {
-                server = embeddedServer(CIO, port = tryPort) {
+                server = embeddedServer(CIO, host = "127.0.0.1", port = tryPort) {
                     install(ContentNegotiation) {
                         json(json)
                     }
                     install(CORS) {
                         anyHost()
+                        allowHeader(HttpHeaders.Authorization)
+                        allowHeader(HttpHeaders.ContentType)
                     }
                     install(StatusPages) {
                         exception<Throwable> { call, cause ->
@@ -85,6 +91,7 @@ class HttpApiServer(
                         route("/v1") {
 
                             get("/models") {
+                                if (!call.requireApiToken()) return@get
                                 call.respond(
                                     OaiModelsResponse(
                                         data = listOf(
@@ -95,6 +102,7 @@ class HttpApiServer(
                             }
 
                             post("/chat/completions") {
+                                if (!call.requireApiToken()) return@post
                                 if (!engine.isReady) {
                                     call.respond(
                                         HttpStatusCode.ServiceUnavailable,
@@ -189,6 +197,7 @@ class HttpApiServer(
 
                         // ── Legacy routes (kept for backward compat) ─────────
                         post("/chat") {
+                            if (!call.requireApiToken()) return@post
                             val start = System.currentTimeMillis()
                             val req = call.receive<ChatRequest>()
                             if (!engine.isReady) {
@@ -208,6 +217,7 @@ class HttpApiServer(
                         }
 
                         post("/vision") {
+                            if (!call.requireApiToken()) return@post
                             val start = System.currentTimeMillis()
                             val req = call.receive<VisionRequest>()
                             if (!engine.isReady) {
@@ -227,6 +237,7 @@ class HttpApiServer(
                         }
 
                         post("/reset") {
+                            if (!call.requireApiToken()) return@post
                             engine.clearHistory()
                             onRequest(RequestLogEntry(endpoint = "/reset", responseTimeMs = 0, statusCode = 200))
                             call.respond(mapOf("status" to "conversation cleared"))
@@ -241,6 +252,17 @@ class HttpApiServer(
             }
         }
         throw IllegalStateException("Could not bind to any port (8080-8082)")
+    }
+
+    private suspend fun ApplicationCall.requireApiToken(): Boolean {
+        if (request.authorization() == "Bearer $apiToken") {
+            return true
+        }
+        respond(
+            HttpStatusCode.Unauthorized,
+            ErrorResponse(error = "Missing or invalid bearer token", code = 401)
+        )
+        return false
     }
 
     fun stop() {

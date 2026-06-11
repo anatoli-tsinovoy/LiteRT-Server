@@ -23,8 +23,10 @@ data class AppState(
     val serverPort: Int = 8080,
     val isGpuBackend: Boolean = true,
     val engineReady: Boolean = false,
-    val requestLog: List<RequestLogEntry> = emptyList()
+    val requestLog: List<RequestLogEntry> = emptyList(),
+    val apiToken: String = ""
 )
+
 
 data class RequestLogEntry(
     val timestamp: Long = System.currentTimeMillis(),

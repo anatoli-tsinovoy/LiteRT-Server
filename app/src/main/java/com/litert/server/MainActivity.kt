@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
                 LLMForegroundService.ACTION_ENGINE_READY -> {
                     val port = intent.getIntExtra(LLMForegroundService.EXTRA_SERVER_PORT, 8080)
                     val isGpu = intent.getBooleanExtra(LLMForegroundService.EXTRA_IS_GPU, true)
+                    val apiToken = intent.getStringExtra(LLMForegroundService.EXTRA_API_TOKEN).orEmpty()
                     // Grab the engine reference from the service singleton
                     liteRTEngine = LLMForegroundService.engineInstance
                     appState = appState.copy(
@@ -98,7 +99,8 @@ class MainActivity : ComponentActivity() {
                         isServerRunning = true,
                         serverPort = port,
                         isGpuBackend = isGpu,
-                        engineReady = true
+                        engineReady = true,
+                        apiToken = apiToken
                     )
                 }
                 LLMForegroundService.ACTION_ENGINE_ERROR -> {
@@ -228,6 +230,7 @@ class MainActivity : ComponentActivity() {
                     2 -> ServerScreen(
                         isRunning = appState.isServerRunning,
                         port = appState.serverPort,
+                        apiToken = appState.apiToken,
                         requestLog = appState.requestLog,
                         onToggle = ::toggleServer
                     )

@@ -32,6 +32,7 @@ import java.util.Locale
 fun ServerScreen(
     isRunning: Boolean,
     port: Int,
+    apiToken: String,
     requestLog: List<RequestLogEntry>,
     onToggle: () -> Unit
 ) {
@@ -106,7 +107,7 @@ fun ServerScreen(
                     Text("Termux curl examples", color = Color.White, fontWeight = FontWeight.SemiBold)
                     IconButton(onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val clip = ClipData.newPlainText("curl", curlExample(port))
+                        val clip = ClipData.newPlainText("curl", curlExample(port, apiToken))
                         clipboard.setPrimaryClip(clip)
                         Toast.makeText(context, "Copied!", Toast.LENGTH_SHORT).show()
                     }) {
@@ -115,7 +116,7 @@ fun ServerScreen(
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    curlExample(port),
+                    curlExample(port, apiToken),
                     color = Color(0xFF9CCC65),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
@@ -164,16 +165,21 @@ fun RequestLogRow(entry: RequestLogEntry) {
     }
 }
 
-private fun curlExample(port: Int) = """
+private fun curlExample(port: Int, apiToken: String) = """
+TOKEN="$apiToken"
+
 curl -X POST http://localhost:$port/chat \
+  -H "Authorization: Bearer ${'$'}TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message":"Hello!"}'
 
 curl http://localhost:$port/health
 
 curl -X POST http://localhost:$port/vision \
+  -H "Authorization: Bearer ${'$'}TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"imagePath":"/sdcard/photo.jpg","prompt":"Describe this"}'
 
-curl -X POST http://localhost:$port/reset
+curl -X POST http://localhost:$port/reset \
+  -H "Authorization: Bearer ${'$'}TOKEN"
 """.trimIndent()

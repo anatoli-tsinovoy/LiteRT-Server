@@ -11,6 +11,8 @@ import androidx.core.app.ServiceCompat
 import com.litert.server.data.RequestLogEntry
 import com.litert.server.engine.LiteRTEngine
 import kotlinx.coroutines.CoroutineScope
+import java.security.SecureRandom
+import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -29,6 +31,7 @@ class LLMForegroundService : Service() {
         const val EXTRA_ERROR_MESSAGE = "error_message"
         const val EXTRA_SERVER_PORT = "server_port"
         const val EXTRA_IS_GPU = "is_gpu"
+        const val EXTRA_API_TOKEN = "api_token"
 
         /**
          * Shared engine reference so MainActivity can call it directly for in-app chat/vision.
@@ -42,6 +45,7 @@ class LLMForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var llmEngine: LiteRTEngine? = null
     private var apiServer: HttpApiServer? = null
+    private val apiToken: String = generateApiToken()
 
     override fun onCreate() {
         super.onCreate()
@@ -66,7 +70,7 @@ class LLMForegroundService : Service() {
                 }
 
                 val requestLog = mutableListOf<RequestLogEntry>()
-                val server = HttpApiServer(engine) { entry ->
+                val server = HttpApiServer(engine, apiToken) { entry ->
                     synchronized(requestLog) { requestLog.add(entry) }
                 }
                 val port = server.start()
@@ -126,6 +130,7 @@ class LLMForegroundService : Service() {
         val intent = Intent(ACTION_ENGINE_READY).apply {
             putExtra(EXTRA_SERVER_PORT, port)
             putExtra(EXTRA_IS_GPU, isGpu)
+            putExtra(EXTRA_API_TOKEN, apiToken)
             setPackage(packageName)
         }
         sendBroadcast(intent)
@@ -137,6 +142,12 @@ class LLMForegroundService : Service() {
             setPackage(packageName)
         }
         sendBroadcast(intent)
+    }
+
+    private fun generateApiToken(): String {
+        val bytes = ByteArray(24)
+        SecureRandom().nextBytes(bytes)
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     }
 
     override fun onDestroy() {
