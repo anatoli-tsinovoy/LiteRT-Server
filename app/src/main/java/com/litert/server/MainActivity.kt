@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity() {
     private var availableModels by mutableStateOf(emptyList<ModelDescriptor>())
     private var installedModels by mutableStateOf(emptyList<ModelArtifact>())
     private var selectedModel by mutableStateOf<com.litert.server.download.ModelDescriptor?>(null)
+    private var hasHuggingFaceToken by mutableStateOf(false)
 
     // Holds reference to the engine once the service boots it.
     // We bind to the service via a shared singleton so the UI can call it directly.
@@ -240,9 +241,12 @@ class MainActivity : ComponentActivity() {
                         selectedModel = selectedModel ?: downloadManager.getActiveModel(),
                         installedModels = installedModels,
                         isGpu = appState.isGpuBackend,
+                        hasHuggingFaceToken = hasHuggingFaceToken,
                         onSelectModel = ::selectModel,
                         onDeleteModel = ::deleteModel,
-                        onDeleteAllModels = ::deleteAllModels
+                        onDeleteAllModels = ::deleteAllModels,
+                        onSaveHuggingFaceToken = ::saveHuggingFaceToken,
+                        onClearHuggingFaceToken = ::clearHuggingFaceToken
                     )
                 }
             }
@@ -339,6 +343,7 @@ class MainActivity : ComponentActivity() {
         availableModels = downloadManager.getAvailableModels()
         installedModels = downloadManager.getInstalledModels()
         selectedModel = downloadManager.getActiveModel()
+        hasHuggingFaceToken = downloadManager.hasHuggingFaceToken()
     }
 
     private fun selectModel(model: ModelDescriptor) {
@@ -392,6 +397,22 @@ class MainActivity : ComponentActivity() {
         } else {
             appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, isServerRunning = false, engineReady = false)
         }
+    }
+
+    private fun saveHuggingFaceToken(token: String) {
+        try {
+            downloadManager.setHuggingFaceToken(token)
+            refreshModels()
+            Toast.makeText(this, "Hugging Face token saved", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, e.message ?: "Invalid Hugging Face token", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun clearHuggingFaceToken() {
+        downloadManager.clearHuggingFaceToken()
+        refreshModels()
+        Toast.makeText(this, "Hugging Face token cleared", Toast.LENGTH_SHORT).show()
     }
 
     private fun startDownload() {

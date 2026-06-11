@@ -16,9 +16,23 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.URI
 import java.util.concurrent.TimeUnit
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 private const val MIN_CUSTOM_MODEL_BYTES = 100_000_000L
 private const val FREE_SPACE_HEADROOM_BYTES = 512L * 1024L * 1024L
+private const val PREF_REGISTRY = "registry"
+private const val PREF_HF_TOKEN = "hugging_face_token"
+private const val HF_TOKEN_KEY_ALIAS = "litert_server_hugging_face_token"
+private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
+private const val GCM_TAG_BITS = 128
 
 data class DownloadProgress(
     val progressPercent: Float,
@@ -139,6 +153,22 @@ class ModelDownloadManager(private val context: Context) {
 
     fun isModelDownloaded(): Boolean = artifactFor(getActiveModel()).isInstalled
 
+    fun hasHuggingFaceToken(): Boolean = !getHuggingFaceToken().isNullOrBlank()
+
+    fun setHuggingFaceToken(token: String) {
+        val normalized = token.trim()
+        if (normalized.isEmpty()) {
+            clearHuggingFaceToken()
+            return
+        }
+        require(normalized.startsWith("hf_")) { "Hugging Face token must start with hf_" }
+        prefs.edit().putString(PREF_HF_TOKEN, encryptToken(normalized)).apply()
+    }
+
+    fun clearHuggingFaceToken() {
+        prefs.edit().remove(PREF_HF_TOKEN).apply()
+    }
+
     fun addCustomHuggingFaceModel(input: String): ModelDescriptor {
         val candidate = resolveHuggingFaceModel(input)
         val existing = getAvailableModels().firstOrNull { it.id == candidate.id || it.downloadUrl == candidate.downloadUrl }
@@ -202,9 +232,7 @@ class ModelDownloadManager(private val context: Context) {
         }
 
         var existingBytes = if (partialFile.exists()) partialFile.length() else 0L
-        val requestBuilder = Request.Builder()
-            .url(model.downloadUrl)
-            .header("User-Agent", "LiteRT-Server-Android/1.0")
+        val requestBuilder = authenticatedRequestBuilder(model.downloadUrl)
         if (existingBytes > 0L) {
             requestBuilder.header("Range", "bytes=$existingBytes-")
         }
@@ -363,9 +391,7 @@ class ModelDownloadManager(private val context: Context) {
     }
 
     private fun fetchDefaultLiteRtFile(repoId: String): String {
-        val request = Request.Builder()
-            .url("https://huggingface.co/api/models/$repoId")
-            .header("User-Agent", "LiteRT-Server-Android/1.0")
+        val request = authenticatedRequestBuilder("https://huggingface.co/api/models/$repoId")
             .build()
         val response = client.newCall(request).execute()
         if (!response.isSuccessful) {
@@ -401,14 +427,67 @@ class ModelDownloadManager(private val context: Context) {
     private fun modelDirectory(model: ModelDescriptor): File = File(context.getExternalFilesDir("models"), sanitizeFilename(model.id))
 
     private fun loadRegistry(): RegistryState {
-        val serialized = prefs.getString("registry", null) ?: return RegistryState()
+        val serialized = prefs.getString(PREF_REGISTRY, null) ?: return RegistryState()
         return runCatching { json.decodeFromString<RegistryState>(serialized) }.getOrDefault(RegistryState())
     }
 
     private fun saveRegistry() {
-        prefs.edit().putString("registry", json.encodeToString(registry)).apply()
+        prefs.edit().putString(PREF_REGISTRY, json.encodeToString(registry)).apply()
     }
 
+    private fun authenticatedRequestBuilder(url: String): Request.Builder {
+        val builder = Request.Builder()
+            .url(url)
+            .header("User-Agent", "LiteRT-Server-Android/1.0")
+        val token = getHuggingFaceToken()
+        if (!token.isNullOrBlank()) {
+            builder.header("Authorization", "Bearer $token")
+        }
+        return builder
+    }
+
+    private fun getHuggingFaceToken(): String? {
+        val encrypted = prefs.getString(PREF_HF_TOKEN, null) ?: return null
+        return runCatching { decryptToken(encrypted) }
+            .getOrElse {
+                clearHuggingFaceToken()
+                null
+            }
+    }
+
+    private fun encryptToken(token: String): String {
+        val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey())
+        val cipherText = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+        return "${Base64.encodeToString(cipher.iv, Base64.NO_WRAP)}:${Base64.encodeToString(cipherText, Base64.NO_WRAP)}"
+    }
+
+    private fun decryptToken(encrypted: String): String {
+        val parts = encrypted.split(':', limit = 2)
+        require(parts.size == 2) { "Invalid encrypted token" }
+        val iv = Base64.decode(parts[0], Base64.NO_WRAP)
+        val cipherText = Base64.decode(parts[1], Base64.NO_WRAP)
+        val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+        cipher.init(Cipher.DECRYPT_MODE, getOrCreateSecretKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+        return cipher.doFinal(cipherText).toString(Charsets.UTF_8)
+    }
+
+    private fun getOrCreateSecretKey(): SecretKey {
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        (keyStore.getEntry(HF_TOKEN_KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+
+        val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+        val spec = KeyGenParameterSpec.Builder(
+            HF_TOKEN_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true)
+            .build()
+        keyGenerator.init(spec)
+        return keyGenerator.generateKey()
+    }
     private fun stableModelId(repoId: String, filename: String): String =
         "hf-${sanitizeFilename("$repoId-$filename".lowercase())}"
 
