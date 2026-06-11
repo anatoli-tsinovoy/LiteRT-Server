@@ -5,6 +5,7 @@ import com.litert.server.data.ChatResponse
 import com.litert.server.data.ErrorResponse
 import com.litert.server.data.HealthResponse
 import com.litert.server.data.OaiChatRequest
+import com.litert.server.data.OaiRequestMessage
 import com.litert.server.data.OaiChatResponse
 import com.litert.server.data.OaiChoice
 import com.litert.server.data.OaiDelta
@@ -40,6 +41,12 @@ import io.ktor.server.routing.routing
 import kotlinx.coroutines.flow.toList
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 class HttpApiServer(
     private val engine: LiteRTEngine,
@@ -115,10 +122,7 @@ class HttpApiServer(
                                 val req = call.receive<OaiChatRequest>()
                                 val start = System.currentTimeMillis()
 
-                                // Build prompt from message history
-                                val prompt = req.messages.joinToString("\n") {
-                                    "${it.role}: ${it.content}"
-                                } + "\nassistant:"
+                                val prompt = buildPrompt(req.messages)
 
                                 if (req.stream) {
                                     val reqId = "chatcmpl-${System.currentTimeMillis()}"
@@ -253,6 +257,42 @@ class HttpApiServer(
             }
         }
         throw IllegalStateException("Could not bind to any port (8080-8082)")
+    }
+
+    private fun buildPrompt(messages: List<OaiRequestMessage>): String {
+        val history = messages.mapNotNull { message ->
+            val content = message.content.toPromptText().trim()
+            when {
+                content.isNotEmpty() -> "${message.role}: $content"
+                message.role == "assistant" -> "assistant:"
+                message.role == "tool" -> "tool: ${message.name ?: message.toolCallId ?: "result"}"
+                else -> null
+            }
+        }.joinToString("\n")
+        return if (history.isEmpty()) "assistant:" else "$history\nassistant:"
+    }
+
+    private fun JsonElement?.toPromptText(): String = when (this) {
+        null, JsonNull -> ""
+        is JsonPrimitive -> contentOrNull ?: toString()
+        is JsonArray -> mapNotNull { it.contentPartToText().takeIf(String::isNotBlank) }.joinToString("\n")
+        is JsonObject -> contentPartToText()
+    }
+
+    private fun JsonElement.contentPartToText(): String = when (this) {
+        is JsonPrimitive -> contentOrNull ?: toString()
+        is JsonArray -> mapNotNull { it.contentPartToText().takeIf(String::isNotBlank) }.joinToString("\n")
+        is JsonObject -> {
+            val type = this["type"]?.toPromptText()
+            val text = this["text"]?.toPromptText()
+                ?: this["input_text"]?.toPromptText()
+                ?: this["content"]?.toPromptText()
+            when {
+                !text.isNullOrBlank() -> text
+                type == "image_url" || type == "input_image" -> "[image omitted]"
+                else -> entries.joinToString(", ") { (key, value) -> "$key=${value.toPromptText()}" }
+            }
+        }
     }
 
     private suspend fun ApplicationCall.requireApiToken(): Boolean {

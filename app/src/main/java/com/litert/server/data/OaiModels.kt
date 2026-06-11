@@ -2,16 +2,26 @@ package com.litert.server.data
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 // OpenAI-compatible request/response models
 
 @Serializable
 data class OaiChatRequest(
     val model: String = "local-litertlm",
-    val messages: List<OaiMessage>,
+    val messages: List<OaiRequestMessage>,
     val stream: Boolean = false,
     @SerialName("max_tokens") val maxTokens: Int? = null,
+    @SerialName("max_completion_tokens") val maxCompletionTokens: Int? = null,
     val temperature: Double? = null
+)
+
+@Serializable
+data class OaiRequestMessage(
+    val role: String,
+    val content: JsonElement? = null,
+    val name: String? = null,
+    @SerialName("tool_call_id") val toolCallId: String? = null
 )
 
 @Serializable
