@@ -165,6 +165,9 @@ class MainActivity : ComponentActivity() {
                     selectedModel = selectedModel ?: downloadManager.getActiveModel(),
                     onModelSelected = ::selectModel,
                     onAddHuggingFaceModel = ::addHuggingFaceModel,
+                    hasHuggingFaceToken = hasHuggingFaceToken,
+                    onSaveHuggingFaceToken = ::saveHuggingFaceToken,
+                    onClearHuggingFaceToken = ::clearHuggingFaceToken,
                     onDownload = ::startDownload,
                     onRetry = ::startDownload,
                     onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) }

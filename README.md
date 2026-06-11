@@ -75,7 +75,7 @@ If GPU init fails, the engine automatically falls back to CPU.
   - Gemma 4 E2B: `https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm`
   - Gemma 4 E4B: `https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm`
 - **Custom models**: paste a compatible Hugging Face repo URL or direct `.litertlm` URL in the Download screen.
-- **Hugging Face auth**: Settings accepts an `hf_...` access token. The app stores it encrypted with Android Keystore and sends it only to Hugging Face API/download requests.
+- **Hugging Face auth**: Download and Settings screens accept an `hf_...` access token. The app stores it encrypted with Android Keystore and sends it only to Hugging Face API/download requests.
 - **Storage**: models are stored in app-private external storage under `[ExternalFilesDir]/models/<model-id>/`.
 - **Safety**: downloads write to `*.part`, resume with HTTP Range, and atomically rename only after minimum-size validation.
 - **Management**: Settings lists installed models with size/path, lets you switch models, delete one model, or delete all models/cache.

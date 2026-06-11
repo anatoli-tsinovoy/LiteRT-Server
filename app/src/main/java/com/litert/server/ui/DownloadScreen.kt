@@ -17,6 +17,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -38,11 +39,15 @@ fun DownloadScreen(
     selectedModel: ModelDescriptor,
     onModelSelected: (ModelDescriptor) -> Unit,
     onAddHuggingFaceModel: (String) -> Unit,
+    hasHuggingFaceToken: Boolean,
+    onSaveHuggingFaceToken: (String) -> Unit,
+    onClearHuggingFaceToken: () -> Unit,
     onDownload: () -> Unit,
     onRetry: () -> Unit,
     onPickFile: () -> Unit
 ) {
     var customModelUrl by remember { mutableStateOf("") }
+    var huggingFaceToken by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -90,6 +95,63 @@ fun DownloadScreen(
                     onClick = { onModelSelected(model) }
                 )
             }
+
+            SettingsCard {
+                Text("Hugging Face Login", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    if (hasHuggingFaceToken) {
+                        "Token saved. Downloads and repo lookups will authenticate with Hugging Face."
+                    } else {
+                        "Optional, but recommended for better rate limits and gated models you accepted."
+                    },
+                    color = Color.Gray,
+                    fontSize = 11.sp
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = huggingFaceToken,
+                    onValueChange = { huggingFaceToken = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("hf_ access token") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = GreenPrimary,
+                        unfocusedBorderColor = Color(0xFF444444),
+                        focusedLabelColor = GreenPrimary,
+                        unfocusedLabelColor = Color.Gray,
+                        cursorColor = GreenPrimary
+                    )
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            onSaveHuggingFaceToken(huggingFaceToken)
+                            huggingFaceToken = ""
+                        },
+                        enabled = huggingFaceToken.isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary)
+                    ) {
+                        Text("Save Token", color = Color.Black)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            huggingFaceToken = ""
+                            onClearHuggingFaceToken()
+                        },
+                        enabled = hasHuggingFaceToken,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray)
+                    ) {
+                        Text("Clear")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             Spacer(modifier = Modifier.height(16.dp))
             SettingsCard {
