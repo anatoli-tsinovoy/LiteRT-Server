@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -39,6 +41,7 @@ fun DownloadScreen(
     selectedModel: ModelDescriptor,
     onModelSelected: (ModelDescriptor) -> Unit,
     onAddHuggingFaceModel: (String) -> Unit,
+    onNativeMaxTokensSaved: (Int) -> Unit,
     hasHuggingFaceToken: Boolean,
     onSaveHuggingFaceToken: (String) -> Unit,
     onClearHuggingFaceToken: () -> Unit,
@@ -48,6 +51,9 @@ fun DownloadScreen(
 ) {
     var customModelUrl by remember { mutableStateOf("") }
     var huggingFaceToken by remember { mutableStateOf("") }
+    var nativeMaxTokensText by remember(selectedModel.id, selectedModel.nativeMaxTokens) {
+        mutableStateOf(selectedModel.nativeMaxTokens.toString())
+    }
 
     Column(
         modifier = Modifier
@@ -95,6 +101,57 @@ fun DownloadScreen(
                     onClick = { onModelSelected(model) }
                 )
             }
+
+            SettingsCard {
+                Text("Native token memory limit", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Controls LiteRT EngineConfig.maxNumTokens. Higher values reserve more KV-cache/native memory and can crash on RAM-constrained devices. Set Pi contextWindow/maxTokens no higher than this value.",
+                    color = Color.Gray,
+                    fontSize = 11.sp
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = nativeMaxTokensText,
+                    onValueChange = { value ->
+                        nativeMaxTokensText = value.filter { it.isDigit() }.take(6)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Native max tokens") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = GreenPrimary,
+                        unfocusedBorderColor = Color(0xFF444444),
+                        focusedLabelColor = GreenPrimary,
+                        unfocusedLabelColor = Color.Gray,
+                        cursorColor = GreenPrimary
+                    )
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(2048, 4096, 8192, 16_384, 32_000).forEach { preset ->
+                        AssistChip(
+                            onClick = { nativeMaxTokensText = preset.toString() },
+                            label = { Text("${preset / 1024}K") }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = { nativeMaxTokensText.toIntOrNull()?.let(onNativeMaxTokensSaved) },
+                    enabled = nativeMaxTokensText.toIntOrNull() != null,
+                    colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary),
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Save native token limit", color = Color.Black)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             SettingsCard {
                 Text("Hugging Face Login", color = Color.White, fontWeight = FontWeight.SemiBold)
@@ -153,12 +210,11 @@ fun DownloadScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Spacer(modifier = Modifier.height(16.dp))
             SettingsCard {
                 Text("Add compatible Hugging Face model", color = Color.White, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "Paste a repo URL or direct .litertlm URL. Repo URLs use the first non-web .litertlm file found.",
+                    "Paste a repo URL or direct Hugging Face .litertlm URL. To import a local file without Hugging Face, use the Import button below.",
                     color = Color.Gray,
                     fontSize = 11.sp
                 )
@@ -227,7 +283,7 @@ fun DownloadScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import .litertlm file for selected model", fontSize = 14.sp)
+                    Text("Import local .litertlm file", fontSize = 14.sp)
                 }
             }
 
@@ -299,7 +355,7 @@ fun DownloadScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import .litertlm file for selected model", fontSize = 14.sp)
+                    Text("Import local .litertlm file", fontSize = 14.sp)
                 }
             }
 
@@ -338,7 +394,7 @@ fun DownloadScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import .litertlm file for selected model", fontSize = 14.sp)
+                    Text("Import local .litertlm file", fontSize = 14.sp)
                 }
             }
 
@@ -380,7 +436,7 @@ fun DownloadScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import .litertlm file for selected model", fontSize = 14.sp)
+                    Text("Import local .litertlm file", fontSize = 14.sp)
                 }
             }
 
@@ -450,6 +506,11 @@ private fun ModelOptionRow(
                 model.description,
                 color = Color.Gray,
                 fontSize = 11.sp
+            )
+            Text(
+                "Native max: ${model.nativeMaxTokens} tokens",
+                color = Color.Gray,
+                fontSize = 10.sp
             )
         }
         Text(

@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.provider.OpenableColumns
 import android.widget.Toast
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -74,11 +75,14 @@ class MainActivity : ComponentActivity() {
         appState = appState.copy(status = AppStatus.INITIALIZING)
         lifecycleScope.launch(Dispatchers.IO) {
             try {
+                val displayName = displayNameFor(uri)
                 val inputStream = contentResolver.openInputStream(uri)
                     ?: throw Exception("Cannot open file")
-                downloadManager.importActiveModel(inputStream)
+                val model = downloadManager.importLocalModel(displayName, inputStream)
                 withContext(Dispatchers.Main) {
+                    stopEngineService()
                     refreshModels()
+                    selectedModel = model
                     startEngineService()
                 }
             } catch (e: Exception) {
@@ -207,6 +211,7 @@ class MainActivity : ComponentActivity() {
                         selectedModel = selectedModel ?: downloadManager.getActiveModel(),
                         onModelSelected = ::selectModel,
                         onAddHuggingFaceModel = ::addHuggingFaceModel,
+                        onNativeMaxTokensSaved = ::saveNativeMaxTokens,
                         hasHuggingFaceToken = hasHuggingFaceToken,
                         onSaveHuggingFaceToken = ::saveHuggingFaceToken,
                         onClearHuggingFaceToken = ::clearHuggingFaceToken,
@@ -393,6 +398,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun saveNativeMaxTokens(nativeMaxTokens: Int) {
+        val model = selectedModel ?: downloadManager.getActiveModel()
+        try {
+            val updated = downloadManager.setNativeMaxTokens(model.id, nativeMaxTokens)
+            val shouldRestart = appState.isServerRunning && downloadManager.isModelDownloaded()
+            if (shouldRestart) stopEngineService()
+            refreshModels()
+            selectedModel = updated
+            if (shouldRestart) startEngineService()
+            Toast.makeText(this, "Native token limit saved", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, e.message ?: "Invalid native token limit", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun deleteModel(model: ModelDescriptor) {
         val deletingActiveModel = selectedModel?.id == model.id
         if (deletingActiveModel) stopEngineService()
@@ -485,12 +505,14 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        DiagnosticsLogger.event("MainActivity", "Starting engine service")
+        val activeModel = downloadManager.getActiveModel()
+        DiagnosticsLogger.event("MainActivity", "Starting engine service nativeMaxTokens=${activeModel.nativeMaxTokens}")
         appState = appState.copy(status = AppStatus.INITIALIZING)
         val intent = Intent(this, LLMForegroundService::class.java).apply {
             putExtra(LLMForegroundService.EXTRA_MODEL_PATH, downloadManager.getModelPath())
-            putExtra(LLMForegroundService.EXTRA_MODEL_ID, downloadManager.getActiveModel().id)
-            putExtra(LLMForegroundService.EXTRA_MODEL_DISPLAY_NAME, downloadManager.getActiveModel().displayName)
+            putExtra(LLMForegroundService.EXTRA_MODEL_ID, activeModel.id)
+            putExtra(LLMForegroundService.EXTRA_MODEL_DISPLAY_NAME, activeModel.displayName)
+            putExtra(LLMForegroundService.EXTRA_NATIVE_MAX_TOKENS, activeModel.nativeMaxTokens)
             putExtra(LLMForegroundService.EXTRA_USE_GPU, true)
         }
         startForegroundService(intent)
@@ -511,6 +533,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+
+    private fun displayNameFor(uri: Uri): String {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) {
+                    val value = cursor.getString(index)
+                    if (!value.isNullOrBlank()) return value
+                }
+            }
+        }
+        return uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { null } ?: "local-model.litertlm"
+    }
     override fun onDestroy() {
         unregisterReceiver(engineReceiver)
         super.onDestroy()

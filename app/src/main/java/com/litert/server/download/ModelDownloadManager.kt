@@ -31,6 +31,9 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import com.litert.server.DiagnosticsLogger
 
+private const val DEFAULT_NATIVE_MAX_TOKENS = 4_096
+private const val MIN_NATIVE_MAX_TOKENS = 512
+private const val MAX_NATIVE_MAX_TOKENS = 128_000
 private const val MIN_CUSTOM_MODEL_BYTES = 100_000_000L
 private const val FREE_SPACE_HEADROOM_BYTES = 512L * 1024L * 1024L
 private const val PREF_REGISTRY = "registry"
@@ -62,14 +65,16 @@ data class ModelDescriptor(
     val estimatedBytes: Long,
     val minValidBytes: Long,
     val source: ModelSource = ModelSource.BUILT_IN,
-    val repoId: String? = null
+    val repoId: String? = null,
+    val contextWindowTokens: Int = DEFAULT_NATIVE_MAX_TOKENS,
+    val nativeMaxTokens: Int = DEFAULT_NATIVE_MAX_TOKENS
 ) {
     val estimatedGb: Float
         get() = estimatedBytes / 1024f / 1024f / 1024f
 }
 
 @Serializable
-enum class ModelSource { BUILT_IN, HUGGING_FACE }
+enum class ModelSource { BUILT_IN, HUGGING_FACE, LOCAL_FILE }
 
 data class ModelArtifact(
     val model: ModelDescriptor,
@@ -87,22 +92,24 @@ object ModelCatalog {
         ModelDescriptor(
             id = "gemma-4-e2b-it",
             displayName = "Gemma 4 E2B",
-            description = "2B MoE · multimodal · LiteRT-LM · 128K ctx",
+            description = "2B MoE · LiteRT-LM · 128K ctx · native limit configurable",
             estimatedBytes = 2_583_000_000L,
             filename = "gemma-4-E2B-it.litertlm",
             downloadUrl = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
             minValidBytes = 2_400_000_000L,
-            repoId = "litert-community/gemma-4-E2B-it-litert-lm"
+            repoId = "litert-community/gemma-4-E2B-it-litert-lm",
+            contextWindowTokens = 128_000
         ),
         ModelDescriptor(
             id = "gemma-4-e4b-it",
             displayName = "Gemma 4 E4B",
-            description = "4B MoE · multimodal · LiteRT-LM · 32K ctx",
+            description = "4B MoE · LiteRT-LM · 32K ctx · native limit configurable",
             estimatedBytes = 3_654_000_000L,
             filename = "gemma-4-E4B-it.litertlm",
             downloadUrl = "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm",
             minValidBytes = 3_500_000_000L,
-            repoId = "litert-community/gemma-4-E4B-it-litert-lm"
+            repoId = "litert-community/gemma-4-E4B-it-litert-lm",
+            contextWindowTokens = 32_000
         )
     )
 
@@ -112,7 +119,13 @@ object ModelCatalog {
 @Serializable
 private data class RegistryState(
     val selectedModelId: String = ModelCatalog.defaultModel.id,
-    val customModels: List<ModelDescriptor> = emptyList()
+    val customModels: List<ModelDescriptor> = emptyList(),
+    val runtimeSettings: Map<String, ModelRuntimeSettings> = emptyMap()
+)
+
+@Serializable
+private data class ModelRuntimeSettings(
+    val nativeMaxTokens: Int = DEFAULT_NATIVE_MAX_TOKENS
 )
 
 @Serializable
@@ -140,7 +153,7 @@ class ModelDownloadManager(private val context: Context) {
     fun getAvailableModels(): List<ModelDescriptor> {
         val builtInIds = ModelCatalog.builtIns.mapTo(mutableSetOf()) { it.id }
         val customModels = registry.customModels.filterNot { it.id in builtInIds }
-        return ModelCatalog.builtIns + customModels
+        return (ModelCatalog.builtIns + customModels).map { it.withRuntimeSettings() }
     }
 
     fun getActiveModel(): ModelDescriptor =
@@ -151,6 +164,18 @@ class ModelDownloadManager(private val context: Context) {
         if (registry.selectedModelId == model.id) return
         registry = registry.copy(selectedModelId = model.id)
         saveRegistry()
+    }
+
+    fun setNativeMaxTokens(modelId: String, nativeMaxTokens: Int): ModelDescriptor {
+        val normalized = nativeMaxTokens.coerceIn(MIN_NATIVE_MAX_TOKENS, MAX_NATIVE_MAX_TOKENS)
+        val model = getAvailableModels().firstOrNull { it.id == modelId }
+            ?: throw IllegalArgumentException("Unknown model: $modelId")
+        val bounded = normalized.coerceAtMost(model.contextWindowTokens.coerceAtLeast(MIN_NATIVE_MAX_TOKENS))
+        registry = registry.copy(
+            runtimeSettings = registry.runtimeSettings + (modelId to ModelRuntimeSettings(nativeMaxTokens = bounded))
+        )
+        saveRegistry()
+        return model.copy(nativeMaxTokens = bounded)
     }
 
     fun getModelPath(): String = modelFile(getActiveModel()).absolutePath
@@ -193,8 +218,52 @@ class ModelDownloadManager(private val context: Context) {
         return candidate
     }
 
-    fun importActiveModel(inputStream: InputStream): Long {
-        val model = getActiveModel()
+    fun importActiveModel(inputStream: InputStream): Long =
+        importModelFile(getActiveModel(), inputStream)
+
+    fun importLocalModel(displayFilename: String, inputStream: InputStream): ModelDescriptor {
+        val filename = sanitizeFilename(displayFilename)
+        require(filename.endsWith(".litertlm", ignoreCase = true)) { "Import a .litertlm file" }
+        val baseName = filename.removeSuffix(".litertlm").ifBlank { "Local LiteRT Model" }
+        val id = "local-${sanitizeFilename("${baseName.lowercase()}-${System.currentTimeMillis()}")}"
+        val model = ModelDescriptor(
+            id = id,
+            displayName = baseName.split('-', '_', '.', ' ')
+                .filter { it.isNotBlank() }
+                .joinToString(" ") { it.replaceFirstChar { ch -> ch.uppercase() } }
+                .ifBlank { "Local LiteRT Model" },
+            description = "Local LiteRT-LM model · native limit configurable",
+            downloadUrl = "",
+            filename = filename,
+            estimatedBytes = MIN_CUSTOM_MODEL_BYTES,
+            minValidBytes = MIN_CUSTOM_MODEL_BYTES,
+            source = ModelSource.LOCAL_FILE,
+            contextWindowTokens = MAX_NATIVE_MAX_TOKENS
+        )
+        val previousSelection = registry.selectedModelId
+        registry = registry.copy(
+            selectedModelId = model.id,
+            customModels = registry.customModels + model
+        )
+        saveRegistry()
+
+        try {
+            importModelFile(model, inputStream)
+            return model.withRuntimeSettings()
+        } catch (t: Throwable) {
+            modelFile(model).delete()
+            partialFile(model).delete()
+            registry = registry.copy(
+                selectedModelId = previousSelection,
+                customModels = registry.customModels.filterNot { it.id == model.id },
+                runtimeSettings = registry.runtimeSettings - model.id
+            )
+            saveRegistry()
+            throw t
+        }
+    }
+
+    private fun importModelFile(model: ModelDescriptor, inputStream: InputStream): Long {
         val finalFile = modelFile(model)
         val partialFile = partialFile(model)
         finalFile.parentFile?.mkdirs()
@@ -611,7 +680,8 @@ class ModelDownloadManager(private val context: Context) {
             estimatedBytes = MIN_CUSTOM_MODEL_BYTES,
             minValidBytes = MIN_CUSTOM_MODEL_BYTES,
             source = ModelSource.HUGGING_FACE,
-            repoId = repoId
+            repoId = repoId,
+            contextWindowTokens = MAX_NATIVE_MAX_TOKENS
         )
     }
 
@@ -670,6 +740,14 @@ class ModelDownloadManager(private val context: Context) {
 
 
     private fun modelDirectory(model: ModelDescriptor): File = File(context.getExternalFilesDir("models"), sanitizeFilename(model.id))
+
+    private fun ModelDescriptor.withRuntimeSettings(): ModelDescriptor {
+        val settings = registry.runtimeSettings[id] ?: return this
+        return copy(
+            nativeMaxTokens = settings.nativeMaxTokens
+                .coerceIn(MIN_NATIVE_MAX_TOKENS, contextWindowTokens.coerceAtLeast(MIN_NATIVE_MAX_TOKENS))
+        )
+    }
 
     private fun loadRegistry(): RegistryState {
         val serialized = prefs.getString(PREF_REGISTRY, null) ?: return RegistryState()

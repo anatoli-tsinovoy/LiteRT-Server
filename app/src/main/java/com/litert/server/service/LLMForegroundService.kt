@@ -30,6 +30,7 @@ class LLMForegroundService : Service() {
         const val EXTRA_MODEL_ID = "model_id"
         const val EXTRA_MODEL_DISPLAY_NAME = "model_display_name"
         const val EXTRA_USE_GPU = "use_gpu"
+        const val EXTRA_NATIVE_MAX_TOKENS = "native_max_tokens"
         const val ACTION_ENGINE_READY = "com.litert.server.ENGINE_READY"
         const val ACTION_ENGINE_ERROR = "com.litert.server.ENGINE_ERROR"
         const val EXTRA_ERROR_MESSAGE = "error_message"
@@ -46,12 +47,6 @@ class LLMForegroundService : Service() {
             private set
     }
 
-        private fun maxNumTokensForModel(modelId: String): Int =
-            when (modelId) {
-                "gemma-4-e2b-it" -> 128_000
-                "gemma-4-e4b-it" -> 32_000
-                else -> 32_000
-            }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var llmEngine: LiteRTEngine? = null
@@ -71,9 +66,9 @@ class LLMForegroundService : Service() {
         val useGpu = intent.getBooleanExtra(EXTRA_USE_GPU, true)
         val modelId = intent.getStringExtra(EXTRA_MODEL_ID) ?: "local-litertlm"
         val modelDisplayName = intent.getStringExtra(EXTRA_MODEL_DISPLAY_NAME) ?: modelId
+        val maxNumTokens = intent.getIntExtra(EXTRA_NATIVE_MAX_TOKENS, 4_096).coerceIn(512, 128_000)
 
         startAsForeground()
-        val maxNumTokens = maxNumTokensForModel(modelId)
         DiagnosticsLogger.event(
             TAG,
             "onStartCommand modelId=$modelId displayName=$modelDisplayName useGpu=$useGpu maxNumTokens=$maxNumTokens path=$modelPath"

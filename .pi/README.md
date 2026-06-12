@@ -73,9 +73,11 @@ Use `gemma-4-e4b-it` instead if that is the active downloaded model.
 - The local `.litertlm` model may not be tool-call trained. Pi can connect to it, but coding-agent tool-use quality depends on the installed model.
 
 - `supportsUsageInStreaming` can be enabled; LiteRT Server reports OpenAI-compatible `usage` fields after generation.
+- `contextWindow` and `maxTokens` must not exceed the app's selected **Native token memory limit** for the active model. The model may support a larger true context window, but LiteRT allocates native/KV-cache memory for `EngineConfig.maxNumTokens`; setting this too high can cause process-killing OOM crashes on phones.
+
 ## Avoid immediate auto-compaction
 
-Pi's default compaction reserves more tokens than small local configs provide. If `contextWindow` is set to `8192`, Pi can compact immediately after a short response because its default reserve is `16384` tokens.
+Pi's default compaction reserves more tokens than small local configs provide. If `contextWindow` is set to `4096`, Pi can compact immediately after a short response because its default reserve is `16384` tokens.
 
 This project includes `.pi/settings.json` with smaller local-model compaction values:
 
@@ -90,10 +92,12 @@ This project includes `.pi/settings.json` with smaller local-model compaction va
 }
 ```
 
-Run `/trust` in Pi, restart Pi, and make sure your `~/.pi/agent/models.json` uses the context windows and `maxTokens` values from `.pi/agent/models.litert-server.example.json`:
+Run `/trust` in Pi, restart Pi, and make sure your `~/.pi/agent/models.json` uses values no higher than the app's Native token memory limit. The included example is conservative:
 
-- `gemma-4-e2b-it`: `contextWindow: 128000`, `maxTokens: 128000`
-- `gemma-4-e4b-it`: `contextWindow: 32000`, `maxTokens: 32000`
+- `gemma-4-e2b-it`: `contextWindow: 4096`, `maxTokens: 4096`
+- `gemma-4-e4b-it`: `contextWindow: 4096`, `maxTokens: 4096`
+
+If your device can initialize the model reliably at a higher native limit, raise both the app setting and Pi's model config together. Do not advertise 32K/128K to Pi unless the app initializes the same native token limit without crashing.
 
 If compaction still interrupts testing, temporarily disable it in `.pi/settings.json`:
 
