@@ -195,6 +195,7 @@ class HttpApiServer(
                                             )
                                             write("data: ${json.encodeToString(errorChunk)}\n\n")
                                         } finally {
+                                            val usage = if (completed) engine.getLastGenerationUsage().toOaiUsage() else null
                                             val stopChunk = OaiStreamChunk(
                                                 id = reqId,
                                                 created = System.currentTimeMillis() / 1000,
@@ -205,10 +206,19 @@ class HttpApiServer(
                                                         delta = OaiDelta(),
                                                         finishReason = "stop"
                                                     )
-                                                ),
-                                                usage = if (completed) engine.getLastGenerationUsage().toOaiUsage() else null
+                                                )
                                             )
                                             write("data: ${json.encodeToString(stopChunk)}\n\n")
+                                            if (usage != null) {
+                                                val usageChunk = OaiStreamChunk(
+                                                    id = reqId,
+                                                    created = System.currentTimeMillis() / 1000,
+                                                    model = modelId,
+                                                    choices = emptyList(),
+                                                    usage = usage
+                                                )
+                                                write("data: ${json.encodeToString(usageChunk)}\n\n")
+                                            }
                                             write("data: [DONE]\n\n")
                                             flush()
                                             DiagnosticsLogger.event(

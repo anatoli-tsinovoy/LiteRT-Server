@@ -43,7 +43,7 @@ android {
 
 dependencies {
     // LiteRT-LM SDK
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.10.0")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.13.1")
 
     // Ktor HTTP server (CIO engine)
     val ktor_version = "2.3.12"

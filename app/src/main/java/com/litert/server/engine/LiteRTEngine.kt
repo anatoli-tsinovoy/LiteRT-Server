@@ -201,19 +201,34 @@ class LiteRTEngine(private val context: Context) {
     private fun generateSingleTurnLocked(prompt: String): Flow<String> = flow {
         val eng = ensureReady()
         lastGenerationUsage = null
+        var completionChunks = 0
+        var completionChars = 0
         val conv = createNewConversation(eng, currentSamplerConfig)
         try {
             conv.sendMessageAsync(prompt).collect { token ->
-                emit(token.toString())
+                val text = token.toString()
+                completionChunks += 1
+                completionChars += text.length
+                emit(text)
             }
-            collectGenerationUsage(conv)
+            collectGenerationUsage(
+                conv = conv,
+                promptChars = prompt.length,
+                completionChunks = completionChunks,
+                completionChars = completionChars
+            )
         } finally {
             safeClose(conv, "generation conversation")
         }
     }
 
     @OptIn(ExperimentalApi::class)
-    private fun collectGenerationUsage(conv: com.google.ai.edge.litertlm.Conversation) {
+    private fun collectGenerationUsage(
+        conv: com.google.ai.edge.litertlm.Conversation,
+        promptChars: Int,
+        completionChunks: Int,
+        completionChars: Int
+    ) {
         try {
             val benchmark = conv.getBenchmarkInfo()
             lastGenerationUsage = GenerationUsage(
@@ -225,10 +240,35 @@ class LiteRTEngine(private val context: Context) {
                 "generation usage promptTokens=${benchmark.lastPrefillTokenCount} completionTokens=${benchmark.lastDecodeTokenCount}"
             )
         } catch (t: Throwable) {
-            lastGenerationUsage = null
-            DiagnosticsLogger.warn(TAG, "generation usage unavailable: ${t.message ?: t.javaClass.name}")
+            val tokenCount = runCatching { conv.getTokenCount() }.getOrNull()
+            if (tokenCount != null && tokenCount > 0) {
+                val completionTokens = completionChunks.coerceAtLeast(estimateTokens(completionChars))
+                    .coerceAtMost(tokenCount)
+                lastGenerationUsage = GenerationUsage(
+                    promptTokens = (tokenCount - completionTokens).coerceAtLeast(0),
+                    completionTokens = completionTokens
+                )
+                DiagnosticsLogger.warn(
+                    TAG,
+                    "benchmark usage unavailable; using conversation token count total=$tokenCount completionEstimate=$completionTokens reason=${t.message ?: t.javaClass.name}"
+                )
+            } else {
+                val promptTokens = estimateTokens(promptChars)
+                val completionTokens = completionChunks.coerceAtLeast(estimateTokens(completionChars))
+                lastGenerationUsage = GenerationUsage(
+                    promptTokens = promptTokens,
+                    completionTokens = completionTokens
+                )
+                DiagnosticsLogger.warn(
+                    TAG,
+                    "benchmark and conversation token count unavailable; using character estimate promptTokens=$promptTokens completionTokens=$completionTokens reason=${t.message ?: t.javaClass.name}"
+                )
+            }
         }
     }
+
+    private fun estimateTokens(chars: Int): Int =
+        ((chars + 3) / 4).coerceAtLeast(0)
 
     suspend fun generateText(prompt: String): Flow<String> = flow {
         sdkMutex.withLock {
