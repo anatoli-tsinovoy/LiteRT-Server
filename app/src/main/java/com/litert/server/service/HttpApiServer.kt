@@ -1,5 +1,6 @@
 package com.litert.server.service
 
+import com.litert.server.DiagnosticsLogger
 import com.litert.server.data.ChatRequest
 import com.litert.server.data.ChatResponse
 import com.litert.server.data.ErrorResponse
@@ -31,6 +32,8 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.authorization
+import io.ktor.server.request.httpMethod
+import io.ktor.server.request.uri
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondTextWriter
@@ -63,6 +66,7 @@ class HttpApiServer(
     fun start(): Int {
         for (tryPort in 8080..8082) {
             try {
+                DiagnosticsLogger.event("HttpApiServer", "Starting server on 127.0.0.1:$tryPort model=$modelId")
                 server = embeddedServer(CIO, host = "127.0.0.1", port = tryPort) {
                     install(ContentNegotiation) {
                         json(json)
@@ -74,6 +78,11 @@ class HttpApiServer(
                     }
                     install(StatusPages) {
                         exception<Throwable> { call, cause ->
+                            DiagnosticsLogger.error(
+                                "HttpApiServer",
+                                "Unhandled ${call.request.httpMethod.value} ${call.request.uri}",
+                                cause
+                            )
                             call.respond(
                                 HttpStatusCode.InternalServerError,
                                 ErrorResponse(error = cause.message ?: "Unknown error", code = 500)
@@ -123,62 +132,92 @@ class HttpApiServer(
                                 val start = System.currentTimeMillis()
 
                                 val prompt = buildPrompt(req.messages)
+                                DiagnosticsLogger.event(
+                                    "HttpApiServer",
+                                    "chat/completions stream=${req.stream} messages=${req.messages.size} promptChars=${prompt.length}"
+                                )
 
                                 if (req.stream) {
                                     val reqId = "chatcmpl-${System.currentTimeMillis()}"
+                                    var streamStatusCode = 200
                                     call.respondTextWriter(contentType = ContentType.Text.EventStream) {
-                                        // First chunk carries the role
-                                        val firstChunk = OaiStreamChunk(
-                                            id = reqId,
-                                            created = System.currentTimeMillis() / 1000,
-                                            model = modelId,
-                                            choices = listOf(
-                                                OaiStreamChoice(
-                                                    index = 0,
-                                                    delta = OaiDelta(role = "assistant", content = "")
-                                                )
-                                            )
-                                        )
-                                        write("data: ${json.encodeToString(firstChunk)}\n\n")
-                                        flush()
-
-                                        engine.generateText(prompt).collect { token ->
-                                            val chunk = OaiStreamChunk(
+                                        var completed = false
+                                        try {
+                                            // First chunk carries the role.
+                                            val firstChunk = OaiStreamChunk(
                                                 id = reqId,
                                                 created = System.currentTimeMillis() / 1000,
                                                 model = modelId,
                                                 choices = listOf(
                                                     OaiStreamChoice(
                                                         index = 0,
-                                                        delta = OaiDelta(content = token)
+                                                        delta = OaiDelta(role = "assistant", content = "")
                                                     )
                                                 )
                                             )
-                                            write("data: ${json.encodeToString(chunk)}\n\n")
+                                            write("data: ${json.encodeToString(firstChunk)}\n\n")
                                             flush()
-                                        }
 
-                                        // Final stop chunk
-                                        val stopChunk = OaiStreamChunk(
-                                            id = reqId,
-                                            created = System.currentTimeMillis() / 1000,
-                                            model = modelId,
-                                            choices = listOf(
-                                                OaiStreamChoice(
-                                                    index = 0,
-                                                    delta = OaiDelta(),
-                                                    finishReason = "stop"
+                                            engine.generateStatelessText(prompt).collect { token ->
+                                                val chunk = OaiStreamChunk(
+                                                    id = reqId,
+                                                    created = System.currentTimeMillis() / 1000,
+                                                    model = modelId,
+                                                    choices = listOf(
+                                                        OaiStreamChoice(
+                                                            index = 0,
+                                                            delta = OaiDelta(content = token)
+                                                        )
+                                                    )
+                                                )
+                                                write("data: ${json.encodeToString(chunk)}\n\n")
+                                                flush()
+                                            }
+                                            completed = true
+                                        } catch (t: Throwable) {
+                                            streamStatusCode = 500
+                                            DiagnosticsLogger.error("HttpApiServer", "chat/completions stream generation failed", t)
+                                            val safeMessage = (t.message ?: t.javaClass.name)
+                                                .replace('\n', ' ')
+                                                .replace('\r', ' ')
+                                            val errorChunk = OaiStreamChunk(
+                                                id = reqId,
+                                                created = System.currentTimeMillis() / 1000,
+                                                model = modelId,
+                                                choices = listOf(
+                                                    OaiStreamChoice(
+                                                        index = 0,
+                                                        delta = OaiDelta(content = "\n[LiteRT generation failed: $safeMessage]")
+                                                    )
                                                 )
                                             )
-                                        )
-                                        write("data: ${json.encodeToString(stopChunk)}\n\n")
-                                        write("data: [DONE]\n\n")
-                                        flush()
+                                            write("data: ${json.encodeToString(errorChunk)}\n\n")
+                                        } finally {
+                                            val stopChunk = OaiStreamChunk(
+                                                id = reqId,
+                                                created = System.currentTimeMillis() / 1000,
+                                                model = modelId,
+                                                choices = listOf(
+                                                    OaiStreamChoice(
+                                                        index = 0,
+                                                        delta = OaiDelta(),
+                                                        finishReason = "stop"
+                                                    )
+                                                )
+                                            )
+                                            write("data: ${json.encodeToString(stopChunk)}\n\n")
+                                            write("data: [DONE]\n\n")
+                                            flush()
+                                            DiagnosticsLogger.event(
+                                                "HttpApiServer",
+                                                "chat/completions stream closed completed=$completed status=$streamStatusCode"
+                                            )
+                                        }
                                     }
                                     val ms = System.currentTimeMillis() - start
-                                    onRequest(RequestLogEntry(endpoint = "/v1/chat/completions", responseTimeMs = ms, statusCode = 200))
+                                    onRequest(RequestLogEntry(endpoint = "/v1/chat/completions", responseTimeMs = ms, statusCode = streamStatusCode))
                                 } else {
-                                    val tokens = engine.generateText(prompt).toList()
+                                    val tokens = engine.generateStatelessText(prompt).toList()
                                     val content = tokens.joinToString("")
                                     val ms = System.currentTimeMillis() - start
                                     onRequest(RequestLogEntry(endpoint = "/v1/chat/completions", responseTimeMs = ms, statusCode = 200))
@@ -212,7 +251,7 @@ class HttpApiServer(
                                 )
                                 return@post
                             }
-                            val tokens = engine.generateText(req.message).toList()
+                            val tokens = engine.generateStatelessText(req.message).toList()
                             val response = tokens.joinToString("")
                             val ms = System.currentTimeMillis() - start
                             onRequest(RequestLogEntry(endpoint = "/chat", responseTimeMs = ms, statusCode = 200))
@@ -223,21 +262,12 @@ class HttpApiServer(
 
                         post("/vision") {
                             if (!call.requireApiToken()) return@post
-                            val start = System.currentTimeMillis()
-                            val req = call.receive<VisionRequest>()
-                            if (!engine.isReady) {
-                                call.respond(
-                                    HttpStatusCode.ServiceUnavailable,
-                                    ErrorResponse("Engine not ready", 503)
-                                )
-                                return@post
-                            }
-                            val tokens = engine.analyzeImage(req.imagePath, req.prompt).toList()
-                            val response = tokens.joinToString("")
-                            val ms = System.currentTimeMillis() - start
-                            onRequest(RequestLogEntry(endpoint = "/vision", responseTimeMs = ms, statusCode = 200))
                             call.respond(
-                                ChatResponse(response = response, tokens = tokens.size, ms = ms)
+                                HttpStatusCode.NotImplemented,
+                                ErrorResponse(
+                                    error = "Vision is disabled for the current text-only LiteRT-LM engine configuration",
+                                    code = 501
+                                )
                             )
                         }
 
@@ -307,6 +337,7 @@ class HttpApiServer(
     }
 
     fun stop() {
+        DiagnosticsLogger.event("HttpApiServer", "Stopping server on port=$port")
         server?.stop(1000, 5000)
         server = null
     }

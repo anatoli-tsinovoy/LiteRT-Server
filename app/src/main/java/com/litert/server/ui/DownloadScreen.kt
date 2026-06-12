@@ -79,7 +79,7 @@ fun DownloadScreen(
         )
         Spacer(modifier = Modifier.height(32.dp))
 
-        if (status == AppStatus.MODEL_NOT_FOUND || status == AppStatus.DOWNLOAD_ERROR) {
+        if (status != AppStatus.DOWNLOADING && status != AppStatus.INITIALIZING) {
             Text(
                 "Select model",
                 color = Color.Gray,
@@ -303,6 +303,87 @@ fun DownloadScreen(
                 }
             }
 
+            AppStatus.READY -> {
+                Icon(
+                    Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = GreenPrimary,
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    "${selectedModel.displayName} is ready",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Use the tabs below for Chat, Server, and Settings. Select a different model above to download or import it.",
+                    color = Color.Gray,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                OutlinedButton(
+                    onClick = onPickFile,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray),
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        Icons.Default.FolderOpen,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Import .litertlm file for selected model", fontSize = 14.sp)
+                }
+            }
+
+            AppStatus.ERROR -> {
+                Text(
+                    "Model failed to start",
+                    color = Color(0xFFEF4444),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                errorMessage?.let {
+                    Text(
+                        it,
+                        color = Color.Gray,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
+                Spacer(modifier = Modifier.height(20.dp))
+                Button(
+                    onClick = onRetry,
+                    colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary),
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Retry Engine Start", fontSize = 15.sp)
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = onPickFile,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray),
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        Icons.Default.FolderOpen,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Import .litertlm file for selected model", fontSize = 14.sp)
+                }
+            }
+
             AppStatus.INITIALIZING -> {
                 CircularProgressIndicator(
                     color = GreenPrimary,
@@ -323,7 +404,6 @@ fun DownloadScreen(
                 )
             }
 
-            else -> {}
         }
         Spacer(modifier = Modifier.height(24.dp))
     }

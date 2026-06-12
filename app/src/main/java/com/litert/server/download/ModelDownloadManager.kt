@@ -29,6 +29,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import com.litert.server.DiagnosticsLogger
 
 private const val MIN_CUSTOM_MODEL_BYTES = 100_000_000L
 private const val FREE_SPACE_HEADROOM_BYTES = 512L * 1024L * 1024L
@@ -238,26 +239,65 @@ class ModelDownloadManager(private val context: Context) {
             return@flow
         }
 
-        val metadata = fetchDownloadMetadata(model)
-        val totalBytes = metadata.totalBytes
-        val usableSpace = finalFile.parentFile?.usableSpace ?: 0L
-        val alreadyDownloadedBytes = if (partialFile.exists()) {
-            partialFile.length()
-        } else {
-            segmentFiles(model).sumOf { if (it.exists()) it.length() else 0L }
-        }
-        val remainingBytes = (totalBytes - alreadyDownloadedBytes).coerceAtLeast(0L)
-        if (usableSpace in 1 until (remainingBytes + FREE_SPACE_HEADROOM_BYTES)) {
-            throw IllegalStateException(
-                "Not enough free space. Need about ${formatGb(remainingBytes + FREE_SPACE_HEADROOM_BYTES)} GB available."
+        var totalBytes = 0L
+        DiagnosticsLogger.beginOperation("Model download ${model.id}")
+        try {
+            val metadata = fetchDownloadMetadata(model)
+            totalBytes = metadata.totalBytes
+            val usableSpace = finalFile.parentFile?.usableSpace ?: 0L
+            val alreadyDownloadedBytes = if (partialFile.exists()) {
+                partialFile.length()
+            } else {
+                segmentFiles(model).sumOf { if (it.exists()) it.length() else 0L }
+            }
+            val remainingBytes = (totalBytes - alreadyDownloadedBytes).coerceAtLeast(0L)
+            DiagnosticsLogger.event(
+                "ModelDownload",
+                "start model=${model.id} totalBytes=$totalBytes alreadyBytes=$alreadyDownloadedBytes supportsRanges=${metadata.supportsRanges} usableSpace=$usableSpace"
             )
-        }
+            if (usableSpace in 1 until (remainingBytes + FREE_SPACE_HEADROOM_BYTES)) {
+                throw IllegalStateException(
+                    "Not enough free space. Need about ${formatGb(remainingBytes + FREE_SPACE_HEADROOM_BYTES)} GB available."
+                )
+            }
 
-        if (metadata.supportsRanges && !partialFile.exists() && totalBytes >= PARALLEL_DOWNLOAD_MIN_BYTES) {
-            downloadParallelSegments(model, partialFile, totalBytes)
-        } else {
-            cleanupSegmentFiles(model)
-            downloadSingleStream(model, partialFile, totalBytes)
+            if (metadata.supportsRanges && !partialFile.exists() && totalBytes >= PARALLEL_DOWNLOAD_MIN_BYTES) {
+                try {
+                    downloadParallelSegments(model, partialFile, totalBytes)
+                } catch (t: Throwable) {
+                    DiagnosticsLogger.warn(
+                        "ModelDownload",
+                        "parallel download failed for ${model.id}; retrying with single stream",
+                        t
+                    )
+                    cleanupSegmentFiles(model)
+                    partialFile.delete()
+                    downloadSingleStream(model, partialFile, totalBytes)
+                }
+            } else {
+                cleanupSegmentFiles(model)
+                try {
+                    downloadSingleStream(model, partialFile, totalBytes)
+                } catch (t: Throwable) {
+                    if (partialFile.exists() && partialFile.length() > 0L) {
+                        DiagnosticsLogger.warn(
+                            "ModelDownload",
+                            "resumed download failed for ${model.id}; retrying from byte 0",
+                            t
+                        )
+                        partialFile.delete()
+                        downloadSingleStream(model, partialFile, totalBytes)
+                    } else {
+                        throw t
+                    }
+                }
+            }
+            DiagnosticsLogger.event("ModelDownload", "download body complete model=${model.id} bytes=${partialFile.length()}")
+        } catch (t: Throwable) {
+            DiagnosticsLogger.error("ModelDownload", "download failed model=${model.id}", t)
+            throw t
+        } finally {
+            DiagnosticsLogger.endOperation("Model download ${model.id}")
         }
 
         if (partialFile.length() < model.minValidBytes) {
@@ -294,6 +334,10 @@ class ModelDownloadManager(private val context: Context) {
             .build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful && response.code != 206) {
+                DiagnosticsLogger.warn(
+                    "ModelDownload",
+                    "metadata request failed model=${model.id} code=${response.code} message=${response.message}"
+                )
                 throw IllegalStateException("Download failed: HTTP ${response.code} — ${response.message}")
             }
             val totalBytes = totalBytes(
@@ -302,6 +346,10 @@ class ModelDownloadManager(private val context: Context) {
                 response.body?.contentLength(),
                 0L,
                 model
+            )
+            DiagnosticsLogger.event(
+                "ModelDownload",
+                "metadata model=${model.id} code=${response.code} totalBytes=$totalBytes contentRange=${response.header("Content-Range") != null}"
             )
             return DownloadMetadata(
                 totalBytes = totalBytes,
@@ -323,6 +371,10 @@ class ModelDownloadManager(private val context: Context) {
 
         client.newCall(requestBuilder.build()).execute().use { response ->
             if (!response.isSuccessful && response.code != 206) {
+                DiagnosticsLogger.warn(
+                    "ModelDownload",
+                    "single stream failed model=${model.id} existingBytes=$existingBytes code=${response.code} message=${response.message}"
+                )
                 throw IllegalStateException("Download failed: HTTP ${response.code} — ${response.message}")
             }
 
@@ -450,6 +502,10 @@ class ModelDownloadManager(private val context: Context) {
             .build()
         client.newCall(request).execute().use { response ->
             if (response.code != 206) {
+                DiagnosticsLogger.warn(
+                    "ModelDownload",
+                    "segment failed model=${model.id} segment=${segment.index + 1} start=${segment.start + existingBytes} end=${segment.endInclusive} code=${response.code}"
+                )
                 throw IllegalStateException("Download segment ${segment.index + 1} failed: HTTP ${response.code}")
             }
             val body = response.body ?: throw IllegalStateException("Empty response body")

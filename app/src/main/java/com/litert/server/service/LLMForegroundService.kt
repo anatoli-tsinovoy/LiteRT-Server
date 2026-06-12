@@ -9,11 +9,13 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import com.litert.server.data.RequestLogEntry
+import com.litert.server.DiagnosticsLogger
 import com.litert.server.engine.LiteRTEngine
 import kotlinx.coroutines.CoroutineScope
 import java.security.SecureRandom
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -48,9 +50,12 @@ class LLMForegroundService : Service() {
     private var llmEngine: LiteRTEngine? = null
     private var apiServer: HttpApiServer? = null
     private val apiToken: String = generateApiToken()
+    private var initializationJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticsLogger.initialize(applicationContext)
+        DiagnosticsLogger.event(TAG, "Service created")
         createNotificationChannel()
     }
 
@@ -61,9 +66,20 @@ class LLMForegroundService : Service() {
         val modelDisplayName = intent.getStringExtra(EXTRA_MODEL_DISPLAY_NAME) ?: modelId
 
         startAsForeground()
+        DiagnosticsLogger.event(
+            TAG,
+            "onStartCommand modelId=$modelId displayName=$modelDisplayName useGpu=$useGpu path=$modelPath"
+        )
 
-        scope.launch {
+        initializationJob?.cancel()
+        initializationJob = scope.launch {
             try {
+                engineInstance = null
+                apiServer?.stop()
+                apiServer = null
+                llmEngine?.shutdown()
+                llmEngine = null
+
                 val engine = LiteRTEngine(applicationContext)
                 llmEngine = engine
 
@@ -86,7 +102,7 @@ class LLMForegroundService : Service() {
                 updateNotification("LiteRT Server Running — $modelDisplayName on localhost:$port")
                 broadcastReady(port, engine.getBackend() == "GPU")
             } catch (t: Throwable) {
-                Log.e(TAG, "Service error", t)
+                DiagnosticsLogger.error(TAG, "Service error", t)
                 broadcastError(t.message ?: "Unknown service error: ${t.javaClass.name}")
             }
         }
@@ -155,9 +171,14 @@ class LLMForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        DiagnosticsLogger.event(TAG, "Service destroy")
+        initializationJob?.cancel()
+        initializationJob = null
         engineInstance = null
         apiServer?.stop()
+        apiServer = null
         llmEngine?.shutdown()
+        llmEngine = null
         scope.cancel()
         super.onDestroy()
     }

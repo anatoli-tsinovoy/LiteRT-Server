@@ -32,7 +32,9 @@ fun SettingsScreen(
     onDeleteModel: (ModelDescriptor) -> Unit,
     onDeleteAllModels: () -> Unit,
     onSaveHuggingFaceToken: (String) -> Unit,
-    onClearHuggingFaceToken: () -> Unit
+    onClearHuggingFaceToken: () -> Unit,
+    onCopyDiagnostics: () -> Unit,
+    onClearDiagnostics: () -> Unit
 ) {
     var temperature by remember { mutableFloatStateOf(0.7f) }
     var maxTokens by remember { mutableFloatStateOf(1024f) }
@@ -201,6 +203,30 @@ fun SettingsScreen(
                 Text("2048", color = Color.Gray, fontSize = 11.sp)
             }
         }
+
+        SettingsCard {
+            Text("Diagnostics", color = Color.White, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "Copy the app-private diagnostics log after a crash or failed request. It includes engine lifecycle, API errors, device info, memory, and stack traces.",
+                color = Color.Gray,
+                fontSize = 12.sp
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onCopyDiagnostics,
+                    colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary)
+                ) {
+                    Text("Copy Diagnostics", color = Color.Black)
+                }
+                OutlinedButton(onClick = onClearDiagnostics) {
+                    Text("Clear")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
 
         Spacer(modifier = Modifier.height(12.dp))
 

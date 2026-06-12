@@ -10,6 +10,8 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Api
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Image
@@ -31,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import com.litert.server.DiagnosticsLogger
 import com.litert.server.data.*
 import com.litert.server.download.ModelArtifact
 import com.litert.server.download.ModelDescriptor
@@ -78,6 +82,7 @@ class MainActivity : ComponentActivity() {
                     startEngineService()
                 }
             } catch (e: Exception) {
+                DiagnosticsLogger.error("MainActivity", "Model import failed", e)
                 withContext(Dispatchers.Main) {
                     appState = appState.copy(
                         status = AppStatus.DOWNLOAD_ERROR,
@@ -92,6 +97,7 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 LLMForegroundService.ACTION_ENGINE_READY -> {
+                    DiagnosticsLogger.event("MainActivity", "ENGINE_READY received")
                     val port = intent.getIntExtra(LLMForegroundService.EXTRA_SERVER_PORT, 8080)
                     val isGpu = intent.getBooleanExtra(LLMForegroundService.EXTRA_IS_GPU, true)
                     val apiToken = intent.getStringExtra(LLMForegroundService.EXTRA_API_TOKEN).orEmpty()
@@ -108,6 +114,7 @@ class MainActivity : ComponentActivity() {
                 }
                 LLMForegroundService.ACTION_ENGINE_ERROR -> {
                     val msg = intent.getStringExtra(LLMForegroundService.EXTRA_ERROR_MESSAGE)
+                    DiagnosticsLogger.error("MainActivity", "ENGINE_ERROR received: ${msg ?: "missing message"}")
                     appState = appState.copy(status = AppStatus.ERROR, errorMessage = msg)
                 }
             }
@@ -120,6 +127,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DiagnosticsLogger.initialize(applicationContext)
+        DiagnosticsLogger.event("MainActivity", "onCreate")
 
         downloadManager = ModelDownloadManager(this)
         refreshModels()
@@ -150,46 +159,14 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     fun AppContent() {
-        when (appState.status) {
-            AppStatus.MODEL_NOT_FOUND, AppStatus.DOWNLOADING, AppStatus.DOWNLOAD_ERROR, AppStatus.INITIALIZING -> {
-                DownloadScreen(
-                    status = appState.status,
-                    progressPercent = appState.downloadProgress,
-                    downloadedMb = appState.downloadedMb,
-                    totalMb = appState.totalMb,
-                    speedMbps = appState.downloadSpeedMbps,
-                    etaSeconds = appState.etaSeconds,
-                    errorMessage = appState.errorMessage,
-                    availableModels = availableModels,
-                    installedModelIds = installedModels.mapTo(mutableSetOf()) { it.model.id },
-                    selectedModel = selectedModel ?: downloadManager.getActiveModel(),
-                    onModelSelected = ::selectModel,
-                    onAddHuggingFaceModel = ::addHuggingFaceModel,
-                    hasHuggingFaceToken = hasHuggingFaceToken,
-                    onSaveHuggingFaceToken = ::saveHuggingFaceToken,
-                    onClearHuggingFaceToken = ::clearHuggingFaceToken,
-                    onDownload = ::startDownload,
-                    onRetry = ::startDownload,
-                    onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) }
-                )
-            }
-            AppStatus.READY -> MainTabLayout()
-            AppStatus.ERROR -> {
-                Box(modifier = Modifier.fillMaxSize().background(DarkBackground)) {
-                    Column(modifier = Modifier.padding(24.dp)) {
-                        Text("Error: ${appState.errorMessage}", color = Color(0xFFEF4444))
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Button(onClick = ::checkModelAndUpdateState) { Text("Retry") }
-                    }
-                }
-            }
-        }
+        MainTabLayout()
     }
 
     @Composable
     fun MainTabLayout() {
-        val tabs = listOf("Chat", "Vision", "Server", "Settings")
+        val tabs = listOf("Models", "Chat", "Vision", "Server", "Settings")
         val icons = listOf(
+            Icons.Default.Download,
             Icons.Default.Chat,
             Icons.Default.Image,
             Icons.Default.Api,
@@ -217,13 +194,33 @@ class MainActivity : ComponentActivity() {
         ) { padding ->
             Box(modifier = Modifier.padding(padding)) {
                 when (selectedTab) {
-                    0 -> ChatScreen(
+                    0 -> DownloadScreen(
+                        status = appState.status,
+                        progressPercent = appState.downloadProgress,
+                        downloadedMb = appState.downloadedMb,
+                        totalMb = appState.totalMb,
+                        speedMbps = appState.downloadSpeedMbps,
+                        etaSeconds = appState.etaSeconds,
+                        errorMessage = appState.errorMessage,
+                        availableModels = availableModels,
+                        installedModelIds = installedModels.mapTo(mutableSetOf()) { it.model.id },
+                        selectedModel = selectedModel ?: downloadManager.getActiveModel(),
+                        onModelSelected = ::selectModel,
+                        onAddHuggingFaceModel = ::addHuggingFaceModel,
+                        hasHuggingFaceToken = hasHuggingFaceToken,
+                        onSaveHuggingFaceToken = ::saveHuggingFaceToken,
+                        onClearHuggingFaceToken = ::clearHuggingFaceToken,
+                        onDownload = ::startDownload,
+                        onRetry = { if (appState.status == AppStatus.ERROR) startEngineService() else startDownload() },
+                        onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) }
+                    )
+                    1 -> ChatScreen(
                         messages = chatMessages,
                         isGenerating = isGenerating,
                         onSend = ::sendMessage,
                         onClear = { chatMessages.clear() }
                     )
-                    1 -> VisionScreen(
+                    2 -> VisionScreen(
                         isAnalyzing = isAnalyzing,
                         analysisResult = visionResult,
                         onAnalyze = ::analyzeImage,
@@ -233,14 +230,14 @@ class MainActivity : ComponentActivity() {
                             Toast.makeText(this@MainActivity, "Copied!", Toast.LENGTH_SHORT).show()
                         }
                     )
-                    2 -> ServerScreen(
+                    3 -> ServerScreen(
                         isRunning = appState.isServerRunning,
                         port = appState.serverPort,
                         apiToken = appState.apiToken,
                         requestLog = appState.requestLog,
                         onToggle = ::toggleServer
                     )
-                    3 -> SettingsScreen(
+                    4 -> SettingsScreen(
                         selectedModel = selectedModel ?: downloadManager.getActiveModel(),
                         installedModels = installedModels,
                         isGpu = appState.isGpuBackend,
@@ -249,7 +246,9 @@ class MainActivity : ComponentActivity() {
                         onDeleteModel = ::deleteModel,
                         onDeleteAllModels = ::deleteAllModels,
                         onSaveHuggingFaceToken = ::saveHuggingFaceToken,
-                        onClearHuggingFaceToken = ::clearHuggingFaceToken
+                        onClearHuggingFaceToken = ::clearHuggingFaceToken,
+                        onCopyDiagnostics = ::copyDiagnostics,
+                        onClearDiagnostics = ::clearDiagnostics
                     )
                 }
             }
@@ -266,6 +265,7 @@ class MainActivity : ComponentActivity() {
 
         val userMsg = ChatMessage(role = MessageRole.USER, content = text)
         chatMessages.add(userMsg)
+        val prompt = buildChatPrompt(chatMessages)
 
         // Placeholder assistant bubble that streams tokens in
         val assistantMsg = ChatMessage(
@@ -279,7 +279,7 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             try {
-                engine.generateText(text)
+                engine.generateText(prompt)
                     .onCompletion { err ->
                         isGenerating = false
                         chatMessages[assistantIndex] =
@@ -295,6 +295,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
             } catch (e: Exception) {
+                DiagnosticsLogger.error("MainActivity", "Chat generation failed", e)
                 isGenerating = false
                 chatMessages[assistantIndex] =
                     chatMessages[assistantIndex].copy(
@@ -303,6 +304,19 @@ class MainActivity : ComponentActivity() {
                     )
             }
         }
+    }
+
+    private fun buildChatPrompt(messages: List<ChatMessage>): String = buildString {
+        append("Continue this conversation. Answer the last user message.\n\n")
+        messages.forEach { message ->
+            if (message.content.isBlank()) return@forEach
+            when (message.role) {
+                MessageRole.USER -> append("User: ")
+                MessageRole.ASSISTANT -> append("Assistant: ")
+            }
+            append(message.content).append('\n')
+        }
+        append("Assistant: ")
     }
 
     // ── Vision ───────────────────────────────────────────────────────────
@@ -335,6 +349,7 @@ class MainActivity : ComponentActivity() {
                         visionResult += token
                     }
             } catch (e: Exception) {
+                DiagnosticsLogger.error("MainActivity", "Vision analysis failed", e)
                 isAnalyzing = false
                 visionResult = "Error: ${e.message}"
             }
@@ -423,28 +438,54 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             downloadManager.downloadModel()
                 .catch { e ->
-                    appState = appState.copy(
-                        status = AppStatus.DOWNLOAD_ERROR,
-                        errorMessage = e.message
-                    )
+                    DiagnosticsLogger.error("MainActivity", "Model download failed", e)
+                    withContext(Dispatchers.Main) {
+                        appState = appState.copy(
+                            status = AppStatus.DOWNLOAD_ERROR,
+                            errorMessage = e.message ?: e.javaClass.simpleName
+                        )
+                    }
                 }
                 .collect { progress ->
-                    appState = appState.copy(
-                        downloadProgress = progress.progressPercent,
-                        downloadedMb = progress.downloadedMb,
-                        totalMb = progress.totalMb,
-                        downloadSpeedMbps = progress.speedMbps,
-                        etaSeconds = progress.etaSeconds
-                    )
-                    if (progress.isDone) {
-                        refreshModels()
-                        startEngineService()
+                    withContext(Dispatchers.Main) {
+                        appState = appState.copy(
+                            downloadProgress = progress.progressPercent,
+                            downloadedMb = progress.downloadedMb,
+                            totalMb = progress.totalMb,
+                            downloadSpeedMbps = progress.speedMbps,
+                            etaSeconds = progress.etaSeconds
+                        )
+                        if (progress.isDone) {
+
+                            refreshModels()
+                            startEngineService()
+                        }
                     }
                 }
         }
     }
 
+    private fun copyDiagnostics() {
+        val text = DiagnosticsLogger.readLog(this)
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("litert-diagnostics", text))
+        Toast.makeText(this, "Copied diagnostics log", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun clearDiagnostics() {
+        DiagnosticsLogger.clear(this)
+        Toast.makeText(this, "Diagnostics log cleared", Toast.LENGTH_SHORT).show()
+    }
+
     private fun startEngineService() {
+        if (!downloadManager.isModelDownloaded()) {
+            selectedTab = 0
+            appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, isServerRunning = false, engineReady = false)
+            Toast.makeText(this, "Download or import a model first", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        DiagnosticsLogger.event("MainActivity", "Starting engine service")
         appState = appState.copy(status = AppStatus.INITIALIZING)
         val intent = Intent(this, LLMForegroundService::class.java).apply {
             putExtra(LLMForegroundService.EXTRA_MODEL_PATH, downloadManager.getModelPath())
@@ -456,6 +497,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopEngineService() {
+        DiagnosticsLogger.event("MainActivity", "Stopping engine service")
         stopService(Intent(this, LLMForegroundService::class.java))
         liteRTEngine = null
         appState = appState.copy(isServerRunning = false, engineReady = false, apiToken = "")
