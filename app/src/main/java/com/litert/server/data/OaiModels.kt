@@ -13,7 +13,9 @@ data class OaiChatRequest(
     val stream: Boolean = false,
     @SerialName("max_tokens") val maxTokens: Int? = null,
     @SerialName("max_completion_tokens") val maxCompletionTokens: Int? = null,
-    val temperature: Double? = null
+    val temperature: Double? = null,
+    val tools: List<OaiTool>? = null,
+    @SerialName("tool_choice") val toolChoice: JsonElement? = null
 )
 
 @Serializable
@@ -27,7 +29,8 @@ data class OaiRequestMessage(
 @Serializable
 data class OaiMessage(
     val role: String,
-    val content: String
+    val content: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<OaiToolCall>? = null
 )
 
 @Serializable
@@ -53,6 +56,32 @@ data class OaiUsage(
     @SerialName("completion_tokens") val completionTokens: Int,
     @SerialName("total_tokens") val totalTokens: Int
 )
+@Serializable
+data class OaiTool(
+    val type: String,
+    val function: OaiFunctionDefinition
+)
+
+@Serializable
+data class OaiFunctionDefinition(
+    val name: String,
+    val description: String? = null,
+    val parameters: JsonElement? = null
+)
+
+@Serializable
+data class OaiToolCall(
+    val id: String,
+    val type: String = "function",
+    val function: OaiFunctionCall
+)
+
+@Serializable
+data class OaiFunctionCall(
+    val name: String,
+    val arguments: String
+)
+
 
 
 @Serializable
@@ -75,7 +104,22 @@ data class OaiStreamChoice(
 @Serializable
 data class OaiDelta(
     val role: String? = null,
-    val content: String? = null
+    val content: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<OaiStreamToolCall>? = null
+)
+
+@Serializable
+data class OaiStreamToolCall(
+    val index: Int,
+    val id: String? = null,
+    val type: String? = null,
+    val function: OaiStreamFunctionCall? = null
+)
+
+@Serializable
+data class OaiStreamFunctionCall(
+    val name: String? = null,
+    val arguments: String? = null
 )
 
 @Serializable
