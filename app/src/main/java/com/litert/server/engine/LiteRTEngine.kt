@@ -43,7 +43,7 @@ class LiteRTEngine(private val context: Context) {
         modelPath: String,
         useGpu: Boolean = true,
         temperature: Double = 0.7,
-        maxTokens: Int = 1024,
+        maxTokens: Int = 32_000,
         topK: Int = 40,
         topP: Double = 0.9
     ): Boolean = withContext(Dispatchers.IO) {

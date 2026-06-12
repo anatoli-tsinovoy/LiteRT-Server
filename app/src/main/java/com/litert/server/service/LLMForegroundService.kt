@@ -46,6 +46,13 @@ class LLMForegroundService : Service() {
             private set
     }
 
+        private fun maxNumTokensForModel(modelId: String): Int =
+            when (modelId) {
+                "gemma-4-e2b-it" -> 128_000
+                "gemma-4-e4b-it" -> 32_000
+                else -> 32_000
+            }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var llmEngine: LiteRTEngine? = null
     private var apiServer: HttpApiServer? = null
@@ -66,9 +73,10 @@ class LLMForegroundService : Service() {
         val modelDisplayName = intent.getStringExtra(EXTRA_MODEL_DISPLAY_NAME) ?: modelId
 
         startAsForeground()
+        val maxNumTokens = maxNumTokensForModel(modelId)
         DiagnosticsLogger.event(
             TAG,
-            "onStartCommand modelId=$modelId displayName=$modelDisplayName useGpu=$useGpu path=$modelPath"
+            "onStartCommand modelId=$modelId displayName=$modelDisplayName useGpu=$useGpu maxNumTokens=$maxNumTokens path=$modelPath"
         )
 
         initializationJob?.cancel()
@@ -83,7 +91,7 @@ class LLMForegroundService : Service() {
                 val engine = LiteRTEngine(applicationContext)
                 llmEngine = engine
 
-                val success = engine.initialize(modelPath, useGpu)
+                val success = engine.initialize(modelPath, useGpu, maxTokens = maxNumTokens)
                 if (!success) {
                     broadcastError(engine.getLastInitializationError() ?: "Failed to initialize LLM engine")
                     return@launch

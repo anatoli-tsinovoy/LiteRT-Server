@@ -88,10 +88,10 @@ This project includes `.pi/settings.json` with smaller local-model compaction va
 }
 ```
 
-Run `/trust` in Pi, restart Pi, and make sure your `~/.pi/agent/models.json` uses the context windows from `.pi/agent/models.litert-server.example.json`:
+Run `/trust` in Pi, restart Pi, and make sure your `~/.pi/agent/models.json` uses the context windows and `maxTokens` values from `.pi/agent/models.litert-server.example.json`:
 
-- `gemma-4-e2b-it`: `contextWindow: 128000`
-- `gemma-4-e4b-it`: `contextWindow: 32000`
+- `gemma-4-e2b-it`: `contextWindow: 128000`, `maxTokens: 128000`
+- `gemma-4-e4b-it`: `contextWindow: 32000`, `maxTokens: 32000`
 
 If compaction still interrupts testing, temporarily disable it in `.pi/settings.json`:
 
