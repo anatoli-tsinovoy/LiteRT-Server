@@ -17,8 +17,8 @@
           "name": "LiteRT Server Gemma 4 E2B",
           "reasoning": false,
           "input": ["text"],
-          "contextWindow": 8192,
-          "maxTokens": 2048,
+          "contextWindow": 128000,
+          "maxTokens": 1024,
           "cost": {
             "input": 0,
             "output": 0,
@@ -31,8 +31,8 @@
           "name": "LiteRT Server Gemma 4 E4B",
           "reasoning": false,
           "input": ["text"],
-          "contextWindow": 8192,
-          "maxTokens": 2048,
+          "contextWindow": 32000,
+          "maxTokens": 1024,
           "cost": {
             "input": 0,
             "output": 0,

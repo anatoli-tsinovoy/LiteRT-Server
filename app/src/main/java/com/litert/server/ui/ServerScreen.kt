@@ -105,13 +105,32 @@ fun ServerScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Termux curl examples", color = Color.White, fontWeight = FontWeight.SemiBold)
-                    IconButton(onClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val clip = ClipData.newPlainText("curl", curlExample(port, apiToken))
-                        clipboard.setPrimaryClip(clip)
-                        Toast.makeText(context, "Copied!", Toast.LENGTH_SHORT).show()
-                    }) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = GreenPrimary)
+                    Row {
+                        TextButton(
+                            enabled = apiToken.isNotBlank(),
+                            onClick = {
+                                copyToClipboard(
+                                    context = context,
+                                    label = "litert-token-export",
+                                    text = tokenExportCommand(apiToken),
+                                    toast = "Copied token export!"
+                                )
+                            }
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, tint = GreenPrimary)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("EXPORT TOKEN", color = GreenPrimary, fontSize = 12.sp)
+                        }
+                        IconButton(onClick = {
+                            copyToClipboard(
+                                context = context,
+                                label = "curl",
+                                text = curlExample(port, apiToken),
+                                toast = "Copied curl examples!"
+                            )
+                        }) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy curl examples", tint = GreenPrimary)
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
@@ -164,6 +183,15 @@ fun RequestLogRow(entry: RequestLogEntry) {
         Text(entry.statusCode.toString(), color = Color(0xFF9CCC65), fontSize = 12.sp)
     }
 }
+
+private fun copyToClipboard(context: Context, label: String, text: String, toast: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val clip = ClipData.newPlainText(label, text)
+    clipboard.setPrimaryClip(clip)
+    Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
+}
+
+private fun tokenExportCommand(apiToken: String) = "export LITERT_SERVER_TOKEN=\"$apiToken\""
 
 private fun curlExample(port: Int, apiToken: String) = """
 TOKEN="$apiToken"
