@@ -206,6 +206,15 @@ class LiteRTEngine(private val context: Context) {
             conv.sendMessageAsync(prompt).collect { token ->
                 emit(token.toString())
             }
+            collectGenerationUsage(conv)
+        } finally {
+            safeClose(conv, "generation conversation")
+        }
+    }
+
+    @OptIn(ExperimentalApi::class)
+    private fun collectGenerationUsage(conv: com.google.ai.edge.litertlm.Conversation) {
+        try {
             val benchmark = conv.getBenchmarkInfo()
             lastGenerationUsage = GenerationUsage(
                 promptTokens = benchmark.lastPrefillTokenCount,
@@ -215,8 +224,9 @@ class LiteRTEngine(private val context: Context) {
                 TAG,
                 "generation usage promptTokens=${benchmark.lastPrefillTokenCount} completionTokens=${benchmark.lastDecodeTokenCount}"
             )
-        } finally {
-            safeClose(conv, "generation conversation")
+        } catch (t: Throwable) {
+            lastGenerationUsage = null
+            DiagnosticsLogger.warn(TAG, "generation usage unavailable: ${t.message ?: t.javaClass.name}")
         }
     }
 
