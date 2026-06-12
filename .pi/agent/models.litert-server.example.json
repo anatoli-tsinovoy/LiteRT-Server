@@ -8,7 +8,7 @@
       "compat": {
         "supportsDeveloperRole": false,
         "supportsReasoningEffort": false,
-        "supportsUsageInStreaming": false,
+        "supportsUsageInStreaming": true,
         "maxTokensField": "max_tokens"
       },
       "models": [

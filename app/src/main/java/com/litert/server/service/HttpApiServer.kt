@@ -15,8 +15,10 @@ import com.litert.server.data.OaiModelEntry
 import com.litert.server.data.OaiModelsResponse
 import com.litert.server.data.OaiStreamChunk
 import com.litert.server.data.OaiStreamChoice
+import com.litert.server.data.OaiUsage
 import com.litert.server.data.RequestLogEntry
 import com.litert.server.data.VisionRequest
+import com.litert.server.engine.GenerationUsage
 import com.litert.server.engine.LiteRTEngine
 import io.ktor.http.HttpHeaders
 import io.ktor.server.application.ApplicationCall
@@ -203,7 +205,8 @@ class HttpApiServer(
                                                         delta = OaiDelta(),
                                                         finishReason = "stop"
                                                     )
-                                                )
+                                                ),
+                                                usage = if (completed) engine.getLastGenerationUsage().toOaiUsage() else null
                                             )
                                             write("data: ${json.encodeToString(stopChunk)}\n\n")
                                             write("data: [DONE]\n\n")
@@ -232,7 +235,8 @@ class HttpApiServer(
                                                     message = OaiMessage(role = "assistant", content = content),
                                                     finishReason = "stop"
                                                 )
-                                            )
+                                            ),
+                                            usage = engine.getLastGenerationUsage().toOaiUsage()
                                         )
                                     )
                                 }
@@ -324,6 +328,16 @@ class HttpApiServer(
             }
         }
     }
+
+
+    private fun GenerationUsage?.toOaiUsage(): OaiUsage? =
+        this?.let {
+            OaiUsage(
+                promptTokens = it.promptTokens,
+                completionTokens = it.completionTokens,
+                totalTokens = it.totalTokens
+            )
+        }
 
     private suspend fun ApplicationCall.requireApiToken(): Boolean {
         if (request.authorization() == "Bearer $apiToken") {

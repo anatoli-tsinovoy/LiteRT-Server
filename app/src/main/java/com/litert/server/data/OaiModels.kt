@@ -36,7 +36,8 @@ data class OaiChatResponse(
     val `object`: String = "chat.completion",
     val created: Long,
     val model: String,
-    val choices: List<OaiChoice>
+    val choices: List<OaiChoice>,
+    val usage: OaiUsage? = null
 )
 
 @Serializable
@@ -47,12 +48,21 @@ data class OaiChoice(
 )
 
 @Serializable
+data class OaiUsage(
+    @SerialName("prompt_tokens") val promptTokens: Int,
+    @SerialName("completion_tokens") val completionTokens: Int,
+    @SerialName("total_tokens") val totalTokens: Int
+)
+
+
+@Serializable
 data class OaiStreamChunk(
     val id: String,
     val `object`: String = "chat.completion.chunk",
     val created: Long,
     val model: String,
-    val choices: List<OaiStreamChoice>
+    val choices: List<OaiStreamChoice>,
+    val usage: OaiUsage? = null
 )
 
 @Serializable

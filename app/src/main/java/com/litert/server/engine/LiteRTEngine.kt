@@ -8,6 +8,7 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -17,6 +18,15 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+
+
+data class GenerationUsage(
+    val promptTokens: Int,
+    val completionTokens: Int
+) {
+    val totalTokens: Int
+        get() = promptTokens + completionTokens
+}
 
 class LiteRTEngine(private val context: Context) {
 
@@ -34,6 +44,9 @@ class LiteRTEngine(private val context: Context) {
         topP = 0.9,
         temperature = 0.7
     )
+
+    @Volatile
+    private var lastGenerationUsage: GenerationUsage? = null
 
     @Volatile
     var isReady = false
@@ -184,13 +197,24 @@ class LiteRTEngine(private val context: Context) {
         )
     }
 
+    @OptIn(ExperimentalApi::class)
     private fun generateSingleTurnLocked(prompt: String): Flow<String> = flow {
         val eng = ensureReady()
+        lastGenerationUsage = null
         val conv = createNewConversation(eng, currentSamplerConfig)
         try {
             conv.sendMessageAsync(prompt).collect { token ->
                 emit(token.toString())
             }
+            val benchmark = conv.getBenchmarkInfo()
+            lastGenerationUsage = GenerationUsage(
+                promptTokens = benchmark.lastPrefillTokenCount,
+                completionTokens = benchmark.lastDecodeTokenCount
+            )
+            DiagnosticsLogger.event(
+                TAG,
+                "generation usage promptTokens=${benchmark.lastPrefillTokenCount} completionTokens=${benchmark.lastDecodeTokenCount}"
+            )
         } finally {
             safeClose(conv, "generation conversation")
         }
@@ -233,6 +257,8 @@ class LiteRTEngine(private val context: Context) {
             }
         }
     }
+
+    fun getLastGenerationUsage(): GenerationUsage? = lastGenerationUsage
 
     suspend fun analyzeImage(imagePath: String, prompt: String): Flow<String> {
         throw UnsupportedOperationException(
