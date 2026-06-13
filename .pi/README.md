@@ -69,8 +69,8 @@ Use `gemma-4-e4b-it` instead if that is the active downloaded model.
 - The app endpoint is OpenAI Chat Completions-compatible, not the OpenAI Responses API.
 - Pi should use `api: "openai-completions"`.
 - `supportsDeveloperRole` should be disabled so Pi sends a standard `system` prompt.
-- `supportsReasoningEffort` should be disabled because the LiteRT Server endpoint ignores reasoning parameters.
-- The local `.litertlm` model may not be tool-call trained. Pi can connect to it, but coding-agent tool-use quality depends on the installed model.
+- `supportsReasoningEffort` can be enabled; LiteRT Server accepts OpenAI `reasoning_effort` values (`minimal`, `low`, `medium`, `high`) and translates them into prompt guidance.
+- The local `.litertlm` model may not be tool-call trained. Pi can connect to it, but coding-agent tool-use quality depends on the installed model. Tool results are returned to the model as `tool_result(...)` messages so it can answer instead of repeating the same call.
 
 - `supportsUsageInStreaming` can be enabled; LiteRT Server reports OpenAI-compatible `usage` fields after generation.
 - `contextWindow` and `maxTokens` must not exceed the app's selected **Native token memory limit** for the active model. The model may support a larger true context window, but LiteRT allocates native/KV-cache memory for `EngineConfig.maxNumTokens`; setting this too high can cause process-killing OOM crashes on phones.

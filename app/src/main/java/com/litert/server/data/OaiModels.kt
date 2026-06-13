@@ -15,7 +15,8 @@ data class OaiChatRequest(
     @SerialName("max_completion_tokens") val maxCompletionTokens: Int? = null,
     val temperature: Double? = null,
     val tools: List<OaiTool>? = null,
-    @SerialName("tool_choice") val toolChoice: JsonElement? = null
+    @SerialName("tool_choice") val toolChoice: JsonElement? = null,
+    @SerialName("reasoning_effort") val reasoningEffort: String? = null
 )
 
 @Serializable
@@ -23,7 +24,8 @@ data class OaiRequestMessage(
     val role: String,
     val content: JsonElement? = null,
     val name: String? = null,
-    @SerialName("tool_call_id") val toolCallId: String? = null
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<OaiToolCall>? = null
 )
 
 @Serializable

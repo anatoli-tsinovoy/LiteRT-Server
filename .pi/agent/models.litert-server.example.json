@@ -7,7 +7,7 @@
       "authHeader": true,
       "compat": {
         "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false,
+        "supportsReasoningEffort": true,
         "supportsUsageInStreaming": true,
         "maxTokensField": "max_tokens"
       },
@@ -15,7 +15,7 @@
         {
           "id": "gemma-4-e2b-it",
           "name": "LiteRT Server Gemma 4 E2B",
-          "reasoning": false,
+          "reasoning": true,
           "input": ["text"],
           "contextWindow": 4096,
           "maxTokens": 4096,
@@ -29,7 +29,7 @@
         {
           "id": "gemma-4-e4b-it",
           "name": "LiteRT Server Gemma 4 E4B",
-          "reasoning": false,
+          "reasoning": true,
           "input": ["text"],
           "contextWindow": 4096,
           "maxTokens": 4096,

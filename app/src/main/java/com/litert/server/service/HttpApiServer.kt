@@ -49,6 +49,7 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.flow.toList
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -59,6 +60,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+
 
 class HttpApiServer(
     private val engine: LiteRTEngine,
@@ -78,6 +80,7 @@ class HttpApiServer(
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val GEMMA_TOOL_CALL_REGEX = Regex("<\\|tool_call>(.*?)<tool_call\\|>", RegexOption.DOT_MATCHES_ALL)
     private val GEMMA_STRING_DELIMITER = "<|\"|>"
+    private val supportedReasoningEfforts = setOf("minimal", "low", "medium", "high")
 
 
     fun start(): Int {
@@ -354,24 +357,51 @@ class HttpApiServer(
     }
 
     private fun buildPrompt(req: OaiChatRequest): String {
+        val reasoningInstructions = buildReasoningInstructions(req.reasoningEffort)
         val toolInstructions = req.tools
             ?.filter { it.type == "function" }
             ?.takeIf { it.isNotEmpty() }
             ?.let(::buildToolInstructions)
             .orEmpty()
-        val history = req.messages.mapNotNull { message ->
-            val content = message.content.toPromptText().trim()
-            when {
-                content.isNotEmpty() -> "${message.role}: $content"
-                message.role == "assistant" -> "assistant:"
-                message.role == "tool" -> "tool: ${message.name ?: message.toolCallId ?: "result"}"
-                else -> null
-            }
-        }.joinToString("\n")
+        val history = req.messages.mapNotNull { formatPromptMessage(it) }.joinToString("\n")
         val chat = if (history.isEmpty()) "assistant:" else "$history\nassistant:"
-        return listOf(toolInstructions, chat)
+        return listOf(reasoningInstructions, toolInstructions, chat)
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
+    }
+
+    private fun buildReasoningInstructions(rawEffort: String?): String {
+        val effort = rawEffort?.trim()?.lowercase().orEmpty()
+        if (effort.isEmpty() || effort == "off" || effort !in supportedReasoningEfforts) return ""
+
+        val description = when (effort) {
+            "minimal" -> "Use only brief internal reasoning."
+            "low" -> "Use light internal reasoning."
+            "medium" -> "Use balanced internal reasoning."
+            else -> "Use thorough internal reasoning before answering."
+        }
+        return "Reasoning effort: $effort. $description Keep hidden reasoning private; output only the final answer or a required tool call."
+    }
+
+    private fun formatPromptMessage(message: OaiRequestMessage): String? {
+        val content = message.content.toPromptText().trim()
+        val toolCalls = message.toolCalls.orEmpty()
+        return when (message.role.lowercase()) {
+            "assistant" -> when {
+                toolCalls.isNotEmpty() && content.isNotEmpty() ->
+                    "assistant: $content\nassistant: ${toolCalls.joinToString("") { it.toGemmaToolCallSyntax() }}"
+                toolCalls.isNotEmpty() ->
+                    "assistant: ${toolCalls.joinToString("") { it.toGemmaToolCallSyntax() }}"
+                content.isNotEmpty() -> "assistant: $content"
+                else -> "assistant:"
+            }
+            "tool" -> {
+                val label = message.name ?: message.toolCallId ?: "result"
+                if (content.isNotEmpty()) "tool_result($label): $content" else "tool_result($label):"
+            }
+            "developer" -> content.takeIf { it.isNotEmpty() }?.let { "system: $it" }
+            else -> content.takeIf { it.isNotEmpty() }?.let { "${message.role}: $it" }
+        }
     }
 
     private fun buildToolInstructions(tools: List<OaiTool>): String {
@@ -382,8 +412,41 @@ class HttpApiServer(
         return "Available tools:\n$definitions\n" +
             "If a tool is required, respond only with Gemma tool-call syntax: " +
             "<|tool_call>call:function_name{argument:<|\"|>value<|\"|>}<tool_call|>. " +
-            "Do not wrap tool calls in markdown or prose."
+            "Do not wrap tool calls in markdown or prose. " +
+            "After a tool_result message, use that result to answer the user; do not repeat the same tool call with the same arguments."
     }
+
+    private fun OaiToolCall.toGemmaToolCallSyntax(): String {
+        val arguments = function.arguments.toGemmaArguments()
+        return "<|tool_call>call:${function.name}{$arguments}<tool_call|>"
+    }
+
+    private fun String.toGemmaArguments(): String {
+        val parsed = runCatching { json.decodeFromString<JsonElement>(this) }.getOrNull()
+        if (parsed !is JsonObject) {
+            return takeIf { it.isNotBlank() && it != "{}" }
+                ?.let { "arguments:${JsonPrimitive(it).toGemmaToolValue()}" }
+                .orEmpty()
+        }
+        return parsed.entries.joinToString(",") { (key, value) ->
+            "$key:${value.toGemmaToolValue()}"
+        }
+    }
+
+    private fun JsonElement.toGemmaToolValue(): String = when (this) {
+        JsonNull -> "null"
+        is JsonPrimitive -> {
+            val text = contentOrNull ?: toString()
+            if (isString) "${GEMMA_STRING_DELIMITER}${text.escapeGemmaString()}${GEMMA_STRING_DELIMITER}" else text
+        }
+        else -> "${GEMMA_STRING_DELIMITER}${toString().escapeGemmaString()}${GEMMA_STRING_DELIMITER}"
+    }
+
+    private fun String.escapeGemmaString(): String =
+        replace("\\", "\\\\")
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+            .replace(GEMMA_STRING_DELIMITER, "\"")
 
     private fun JsonElement?.toPromptText(): String = when (this) {
         null, JsonNull -> ""

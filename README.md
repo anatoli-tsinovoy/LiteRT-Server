@@ -46,7 +46,13 @@ TOKEN="<token shown in the app>"
 # Health check does not require auth
 curl http://localhost:8080/health
 
-# Chat
+# OpenAI-compatible chat completions
+curl -N -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local-litertlm","stream":true,"reasoning_effort":"low","messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
+
+# Legacy chat
 curl -X POST http://localhost:8080/chat \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \

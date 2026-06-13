@@ -196,6 +196,11 @@ private fun tokenExportCommand(apiToken: String) = "export LITERT_SERVER_TOKEN=\
 private fun curlExample(port: Int, apiToken: String) = """
 TOKEN="$apiToken"
 
+curl -N -X POST http://localhost:$port/v1/chat/completions \
+  -H "Authorization: Bearer ${'$'}TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local-litertlm","stream":true,"reasoning_effort":"low","messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
+
 curl -X POST http://localhost:$port/chat \
   -H "Authorization: Bearer ${'$'}TOKEN" \
   -H "Content-Type: application/json" \
