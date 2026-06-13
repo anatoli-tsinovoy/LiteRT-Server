@@ -149,12 +149,13 @@ class HttpApiServer(
                                 }
 
                                 val req = call.receive<OaiChatRequest>()
+                                val isToolResultTurn = req.isToolResultTurn()
                                 val start = System.currentTimeMillis()
 
                                 val prompt = buildPrompt(req)
                                 DiagnosticsLogger.event(
                                     "HttpApiServer",
-                                    "chat/completions stream=${req.stream} messages=${req.messages.size} promptChars=${prompt.length}"
+                                    "chat/completions stream=${req.stream} messages=${req.messages.size} toolResultTurn=$isToolResultTurn promptChars=${prompt.length}"
                                 )
 
                                 if (req.stream) {
@@ -180,7 +181,7 @@ class HttpApiServer(
                                             flush()
 
                                             val content = engine.generateStatelessText(prompt).toList().joinToString("")
-                                            val parsedToolCalls = parseGemmaToolCalls(content)
+                                            val parsedToolCalls = postProcessToolResultTurn(req, parseGemmaToolCalls(content))
                                             if (parsedToolCalls.toolCalls.isNotEmpty()) {
                                                 streamFinishReason = "tool_calls"
                                                 val chunk = OaiStreamChunk(
@@ -280,7 +281,7 @@ class HttpApiServer(
                                     onRequest(RequestLogEntry(endpoint = "/v1/chat/completions", responseTimeMs = ms, statusCode = streamStatusCode))
                                 } else {
                                     val rawContent = engine.generateStatelessText(prompt).toList().joinToString("")
-                                    val parsedToolCalls = parseGemmaToolCalls(rawContent)
+                                    val parsedToolCalls = postProcessToolResultTurn(req, parseGemmaToolCalls(rawContent))
                                     val ms = System.currentTimeMillis() - start
                                     onRequest(RequestLogEntry(endpoint = "/v1/chat/completions", responseTimeMs = ms, statusCode = 200))
                                     call.respond(
@@ -358,13 +359,23 @@ class HttpApiServer(
 
     private fun buildPrompt(req: OaiChatRequest): String {
         val reasoningInstructions = buildReasoningInstructions(req.reasoningEffort)
-        val toolInstructions = req.tools
-            ?.filter { it.type == "function" }
-            ?.takeIf { it.isNotEmpty() }
-            ?.let(::buildToolInstructions)
-            .orEmpty()
+        val isToolResultTurn = req.isToolResultTurn()
+        val toolInstructions = if (isToolResultTurn) {
+            ""
+        } else {
+            req.tools
+                ?.filter { it.type == "function" }
+                ?.takeIf { it.isNotEmpty() }
+                ?.let(::buildToolInstructions)
+                .orEmpty()
+        }
         val history = req.messages.mapNotNull { formatPromptMessage(it) }.joinToString("\n")
-        val chat = if (history.isEmpty()) "assistant:" else "$history\nassistant:"
+        val postToolInstructions = if (isToolResultTurn) buildPostToolInstructions() else ""
+        val chat = if (history.isEmpty()) {
+            "assistant:"
+        } else {
+            listOf(history, postToolInstructions, "assistant:").filter { it.isNotBlank() }.joinToString("\n")
+        }
         return listOf(reasoningInstructions, toolInstructions, chat)
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
@@ -397,12 +408,38 @@ class HttpApiServer(
             }
             "tool" -> {
                 val label = message.name ?: message.toolCallId ?: "result"
-                if (content.isNotEmpty()) "tool_result($label): $content" else "tool_result($label):"
+                if (content.isNotEmpty()) {
+                    "tool_result($label): $content\nsystem: The tool_result above is already available. Answer the user from it now."
+                } else {
+                    "tool_result($label):\nsystem: The tool returned no content. Answer the user with that fact now."
+                }
             }
             "developer" -> content.takeIf { it.isNotEmpty() }?.let { "system: $it" }
             else -> content.takeIf { it.isNotEmpty() }?.let { "${message.role}: $it" }
         }
     }
+    private fun OaiChatRequest.isToolResultTurn(): Boolean =
+        messages.lastOrNull()?.role?.equals("tool", ignoreCase = true) == true
+
+    private fun postProcessToolResultTurn(
+        req: OaiChatRequest,
+        parsed: ParsedToolCalls
+    ): ParsedToolCalls {
+        if (!req.isToolResultTurn() || parsed.toolCalls.isEmpty()) return parsed
+
+        val fallback = parsed.content.takeIf { it.isNotBlank() }
+            ?: req.messages.lastOrNull()?.content.toPromptText().trim().takeIf { it.isNotBlank() }
+            ?.let { "Tool result: $it" }
+            ?: "The tool returned no content."
+        DiagnosticsLogger.event("HttpApiServer", "suppressed repeated tool call after tool_result count=${parsed.toolCalls.size}")
+        return ParsedToolCalls(content = fallback, toolCalls = emptyList())
+    }
+
+
+    private fun buildPostToolInstructions(): String =
+        "The latest message is a tool_result from a tool you already requested. " +
+            "Do not emit <|tool_call> again on this turn. " +
+            "Use the tool_result to answer the user's original request in natural language."
 
     private fun buildToolInstructions(tools: List<OaiTool>): String {
         val definitions = tools.joinToString("\n") { tool ->

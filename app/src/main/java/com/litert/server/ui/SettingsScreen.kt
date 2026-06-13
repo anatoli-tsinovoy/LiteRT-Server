@@ -245,7 +245,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
         Text("LiteRT Server v1.0", color = Color.Gray, fontSize = 12.sp)
-        Text("LiteRT-LM SDK 0.10.0", color = Color.Gray, fontSize = 12.sp)
+        Text("LiteRT-LM SDK 0.13.1", color = Color.Gray, fontSize = 12.sp)
     }
 
     modelToDelete?.let { model ->
