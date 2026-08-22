@@ -50,6 +50,20 @@ Gemma license, create a Hugging Face token with public-gated-repository read
 access, and save it in the app before downloading. The app encrypts the token
 with Android Keystore and only attaches it to Hugging Face requests.
 
+Two additional built-in options use the official Apache-2.0
+`litert-community` Gemma 4 LiteRT-LM artifacts:
+
+- Gemma 4 E2B: 2,588,147,712 bytes; minimum published device memory 8 GB.
+- Gemma 4 E4B: 3,659,530,240 bytes; minimum published device memory 12 GB.
+
+Both artifacts are ungated and pin the official Gallery catalog revisions.
+They advertise 32,000-token contexts, and the native context remains editable
+while the server is stopped. E2B defaults to 32,000; it initialized on GPU and
+completed an authenticated completion on the 16 GB Snapdragon 8 Gen 3 test
+device. E4B defaults to 16,384: its 32,000-token allocation terminated the app
+and its launching terminal, 24,576 also failed, and 16,384 initialized on GPU
+and completed an authenticated completion.
+
 Models live in app-private external storage under
 `[ExternalFilesDir]/models/<model-id>/`.
 

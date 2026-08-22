@@ -106,6 +106,30 @@ object ModelCatalog {
             nativeMaxTokens = 24_576,
             isCustom = false,
             toolPromptProfile = ToolPromptProfile.STRICT_JSON_RELAY
+        ),
+        ModelDescriptor(
+            id = "gemma-4-e2b-it",
+            displayName = "Gemma 4 E2B",
+            description = "2B effective · mobile quantization · official LiteRT-LM · 32K context",
+            downloadUrl = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/6e5c4f1e395deb959c494953478fa5cec4b8008f/gemma-4-E2B-it.litertlm",
+            filename = "gemma-4-E2B-it.litertlm",
+            expectedBytes = 2_588_147_712L,
+            contextWindowTokens = 32_000,
+            nativeMaxTokens = 32_000,
+            isCustom = false,
+            toolPromptProfile = ToolPromptProfile.STRICT_JSON_RELAY
+        ),
+        ModelDescriptor(
+            id = "gemma-4-e4b-it",
+            displayName = "Gemma 4 E4B",
+            description = "4B effective · mobile quantization · official LiteRT-LM · 32K context",
+            downloadUrl = "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/28299f30ee4d43294517a4ac93abd6163412f07f/gemma-4-E4B-it.litertlm",
+            filename = "gemma-4-E4B-it.litertlm",
+            expectedBytes = 3_659_530_240L,
+            contextWindowTokens = 32_000,
+            nativeMaxTokens = 16_384,
+            isCustom = false,
+            toolPromptProfile = ToolPromptProfile.STRICT_JSON_RELAY
         )
     )
 

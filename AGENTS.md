@@ -146,6 +146,20 @@ Expected requested permissions are limited to internet, foreground service, noti
   public-gated-repository read access. GPU health, an authenticated `GEMMA_OK`
   completion, and the 20K prompt have been device-verified; the first cold
   start terminated once before the cached retry succeeded.
+- The built-in Gemma 4 E2B and E4B options pin the official Gallery catalog
+  revisions of the `litert-community` Apache-2.0 artifacts. The generic E2B
+  file is 2,588,147,712 bytes with an 8 GB published minimum; the generic E4B
+  file is 3,659,530,240 bytes with a 12 GB published minimum. Both advertise
+  32,000-token contexts and are ungated. E2B uses the Gallery default of 32,000
+  native tokens; GPU health and an authenticated `E2B_OK` completion have been
+  device-verified with that allocation. E4B defaults to 16,384 on the 16 GB
+  SM8650 test device: a 32,000-token allocation terminated the app and its
+  launching terminal, 24,576 also failed, and GPU health plus an authenticated
+  `E4B_OK` completion succeeded with 16,384.
+  The app explicitly selects its host-side Gemma `STRICT_JSON_RELAY` profile;
+  it does not extract the artifacts' native tagged tool templates. The
+  Gallery's optional MTP update revisions are not used because this app does
+  not implement its MTP update toggle.
 - Keep CPU and GPU cache directories separate. LiteRT caches GPU programs and
   weights, and its GPU environment or failure is process-static; restart the
   app process after changing manifest libraries, models, or GPU cache state.
