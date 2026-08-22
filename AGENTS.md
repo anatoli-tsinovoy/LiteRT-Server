@@ -138,11 +138,14 @@ Expected requested permissions are limited to internet, foreground service, noti
   replaces the old artifact instead of orphaning it.
 - The larger built-in model is the pinned 4,919,541,760-byte
   `gemma-3n-E4B-it-int4.litertlm` artifact. It advertises a 32K context and
-  defaults to 4096 native tokens on the 16 GB SM8650 test device. Its Hugging
-  Face repository is gated and requires accepted Gemma terms plus a token with
-  public-gated-repository read access. GPU health and an authenticated
-  `GEMMA_OK` completion have been device-verified; the first cold start
-  terminated once before the cached retry succeeded.
+  defaults to 24,576 native tokens on the 16 GB SM8650 test device so OMP's
+  large system prompt fits with generation headroom. A direct 20,023-token
+  request completed without terminating the server; a roughly 30K request with
+  a 32,768 native allocation terminated the process. Its Hugging Face
+  repository is gated and requires accepted Gemma terms plus a token with
+  public-gated-repository read access. GPU health, an authenticated `GEMMA_OK`
+  completion, and the 20K prompt have been device-verified; the first cold
+  start terminated once before the cached retry succeeded.
 - Keep CPU and GPU cache directories separate. LiteRT caches GPU programs and
   weights, and its GPU environment or failure is process-static; restart the
   app process after changing manifest libraries, models, or GPU cache state.
@@ -185,7 +188,7 @@ Expected requested permissions are limited to internet, foreground service, noti
 - Tool-enabled requests default to temperature 0. `STRICT_JSON_RELAY` requests
   force temperature 0 even when the client supplies another value;
   `TAGGED_JSON` retains the client override.
-- `STRICT_JSON_RELAY` relays the final/current tool-result text verbatim only when the request's final message is a `role: "tool"` result with a non-null `tool_call_id` (`toolCallId` internally) matching an earlier assistant tool call ID in the same request. Tool results from historical turns are never replayed on later turns. Otherwise it performs normal generation and never labels the result completed by a known function name. This prevents repeated calls and corruption of exact file or command output; never parse that relayed result as a new model-generated tool call.
+- `STRICT_JSON_RELAY` relays the trailing/current tool-result text verbatim only when the request's last message is a `role: "tool"` result with a non-null `tool_call_id` (`toolCallId` internally) matching an assistant tool call earlier in the same request. A matched result from an older turn is never replayed after a later user message or after a newer unmatched tool result. Otherwise it performs normal generation and never labels the result completed by a known function name. This prevents repeated calls and corruption of exact file or command output; never parse that relayed result as a new model-generated tool call.
 - Streaming completions are buffered before emitting content or a tool call.
   A tool call is emitted as one OpenAI-compatible SSE delta followed by
   `finish_reason: "tool_calls"`, usage, and `[DONE]`.
@@ -211,9 +214,22 @@ LITERT_SERVER_TOKEN="<token>" omp -p \
 
 ## Security and privacy notes
 
-- The embedded Ktor server binds to `127.0.0.1` only.
-- Non-health API routes require `Authorization: Bearer <token>`.
-- The token is generated per service instance and shown in the Server tab curl examples.
+- The embedded Ktor server binds exactly to `127.0.0.1:<PORT>` only. The
+  persisted `server_port` setting defaults (and migrates) to `8080`, accepts
+  only `1024` through `65535`, and is editable only while `STOPPED`.
+  `ServerStatus.CONFIGURING` is busy and non-mutable. There is no fallback port: a
+  collision fails startup with an error naming `127.0.0.1:<PORT>`.
+- `GET /health` is unauthenticated. Every `/v1/*` route requires
+  `Authorization: Bearer <token>`.
+- The API token persists across process death. Regeneration is allowed only
+  while `STOPPED`; it enters `ServerStatus.CONFIGURING` before I/O, generates 24
+  `SecureRandom` bytes encoded as URL-safe Base64 without padding, synchronously
+  commits the candidate, and then atomically updates the service field and
+  snapshot. If the commit fails, the old token remains. A running server
+  captures an immutable token, so regeneration never rotates a live server.
+  After a successful stopped regeneration, the old token is immediately
+  invalid for the next server instance, and the UI recomposes its endpoint,
+  curl examples, and token immediately.
 - Android backup is disabled in the manifest.
 - Camera, media-read, network-state, and wake-lock permissions are intentionally not requested.
 

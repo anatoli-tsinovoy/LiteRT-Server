@@ -41,9 +41,12 @@ published LiteRT-LM 0.13.1 OpenCL GPU results.
 
 The larger built-in model is the pinned 4,919,541,760-byte
 [`google/gemma-3n-E4B-it-litert-lm`](https://huggingface.co/google/gemma-3n-E4B-it-litert-lm)
-INT4 artifact. It advertises a 32K context and defaults to a 4096-token native
-limit on this 16 GB Snapdragon 8 Gen 3 device. The repository is gated: accept
-the Gemma license, create a Hugging Face token with public-gated-repository read
+INT4 artifact. It advertises a 32K context and defaults to a 24,576-token native
+limit on this 16 GB Snapdragon 8 Gen 3 device. A direct 20,023-token request
+completed without terminating the server; a roughly 30K request with a 32,768
+native allocation did terminate the process, so the default keeps headroom for
+generation and OMP's large system prompt. The repository is gated: accept the
+Gemma license, create a Hugging Face token with public-gated-repository read
 access, and save it in the app before downloading. The app encrypts the token
 with Android Keystore and only attaches it to Hugging Face requests.
 
@@ -52,11 +55,27 @@ Models live in app-private external storage under
 
 ## HTTP API
 
-The server binds only to `127.0.0.1`, using the first available port from
-8080–8082. The API token is generated once and persisted by the app.
+`PORT` is the persisted localhost port selected in the app while the server is
+stopped. It is stored as `server_port`, defaults (and migrates) to `8080`, and
+accepts only `1024` through `65535`. The server binds exactly to
+`127.0.0.1:<PORT>`; it never falls back to another port. A collision is a
+startup error naming `127.0.0.1:<PORT>`.
+
+The API token persists across process death. Regenerate it only while the
+server is stopped. Regeneration enters `ServerStatus.CONFIGURING` before I/O;
+while `ServerStatus.CONFIGURING`, configuration controls are busy and
+non-mutable. It creates 24
+`SecureRandom` bytes encoded as URL-safe Base64 without padding, synchronously
+commits the candidate, and then atomically updates the service field and
+snapshot. If the commit fails, the old token is retained. A running server
+captures an immutable token, so regeneration never rotates a live server. A
+successful stopped regeneration immediately invalidates the old token for the
+next server instance. The endpoint, curl examples, and token shown by the UI
+recompose immediately.
 
 ```bash
-BASE_URL=http://127.0.0.1:8080
+PORT=8080 # replace with the port selected in the app
+BASE_URL="http://127.0.0.1:${PORT}"
 TOKEN="<token shown in the app>"
 MODEL=qwen3-0.6b
 
@@ -86,11 +105,13 @@ in-app chat routes.
 ## OMP model entry
 
 Add a provider to `~/.omp/agent/models.yml`:
+Replace `<PORT>` with the exact port selected in the app; it is not necessarily
+the default `8080`.
 
 ```yaml
 providers:
   litert-server:
-    baseUrl: http://127.0.0.1:8080/v1
+    baseUrl: http://127.0.0.1:<PORT>/v1
     api: openai-completions
     apiKey: LITERT_SERVER_TOKEN
     authHeader: true
@@ -134,12 +155,14 @@ omp --model litert-server/qwen3-0.6b
   does not expose Jinja or GGUF metadata here, so the server performs no such
   metadata extraction.
 - `TAGGED_JSON` uses the tagged tool protocol. `STRICT_JSON_RELAY` uses bare
-  JSON examples, forces tool temperature to 0, and relays the final/current
-  tool-result text verbatim only when the request's final message is a
-  `role: "tool"` result with a non-null `tool_call_id` matching an earlier
-  assistant tool call ID in the same request. Tool results from historical turns
-  are never replayed on later turns. Without that match, it performs normal
-  generation and never labels the result completed by a known function name.
+  JSON examples, forces tool temperature to 0, and relays the
+  trailing/current tool-result text verbatim only when the request's last
+  message is a `role: "tool"` result with a non-null `tool_call_id` matching
+  an assistant tool call earlier in the same request. It never replays a
+  matched result from an older turn after a later user message or after a
+  newer unmatched tool result. If those conditions are not met, it performs
+  normal generation and never labels the result completed by a known function
+  name.
 - OpenAI function tools are returned as `tool_calls`.
 - Server inference is serialized to protect the native engine.
 - Download and inference work run off the Android main thread.

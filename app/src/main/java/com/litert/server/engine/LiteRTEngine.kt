@@ -15,6 +15,8 @@ import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -29,11 +31,12 @@ data class GenerationUsage(
 }
 
 class LiteRTEngine(private val context: Context) {
-
     companion object {
         private const val TAG = "LiteRTEngine"
         private const val DEFAULT_TOP_K = 40
         private const val DEFAULT_TOP_P = 0.9
+        private const val CANCELLATION_DRAIN_INTERVAL_MILLIS = 100L
+        private const val CANCELLATION_DRAIN_ATTEMPTS = 20
         private val GPU_LOG_MARKERS =
             listOf(
                 "litert",
@@ -49,6 +52,14 @@ class LiteRTEngine(private val context: Context) {
     }
 
     private val mutex = Mutex()
+    private val conversationLock = Any()
+    private var activeConversation: Conversation? = null
+
+    fun cancelActiveConversation() {
+        synchronized(conversationLock) {
+            activeConversation?.let(::cancelConversation)
+        }
+    }
     private var nativeEngine: Engine? = null
 
     @Volatile
@@ -110,6 +121,7 @@ class LiteRTEngine(private val context: Context) {
                         return@withLock Result.success(Unit)
                     } catch (error: Exception) {
                         if (error is CancellationException) {
+                            candidate?.let(::closeFailedEngine)
                             throw error
                         }
                         lastFailure = error
@@ -160,6 +172,9 @@ class LiteRTEngine(private val context: Context) {
                             )
                     )
                 )
+            synchronized(conversationLock) {
+                activeConversation = conversation
+            }
             var completionChars = 0
             try {
                 conversation.sendMessageAsync(prompt).collect { message ->
@@ -175,10 +190,15 @@ class LiteRTEngine(private val context: Context) {
                     completionChars = completionChars,
                 )
             } catch (cancellation: CancellationException) {
-                cancelConversation(conversation)
+                drainCancellation(conversation)
                 throw cancellation
             } finally {
-                closeConversation(conversation)
+                synchronized(conversationLock) {
+                    if (activeConversation === conversation) {
+                        activeConversation = null
+                    }
+                    closeConversation(conversation)
+                }
             }
         }
     }
@@ -208,6 +228,17 @@ class LiteRTEngine(private val context: Context) {
             }
         }
     }
+    private suspend fun drainCancellation(conversation: Conversation) {
+        withContext(NonCancellable + Dispatchers.IO) {
+            repeat(CANCELLATION_DRAIN_ATTEMPTS) { attempt ->
+                cancelConversation(conversation)
+                if (attempt + 1 < CANCELLATION_DRAIN_ATTEMPTS) {
+                    delay(CANCELLATION_DRAIN_INTERVAL_MILLIS)
+                }
+            }
+        }
+    }
+
 
     private fun cancelConversation(conversation: Conversation) {
         runCatching { conversation.cancelProcess() }

@@ -2,7 +2,10 @@ package com.litert.server
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ClipDescription
 import android.content.Context
+import android.os.Build
+import android.os.PersistableBundle
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -56,6 +59,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.litert.server.data.DEFAULT_SERVER_PORT
+import com.litert.server.data.MAX_SERVER_PORT
+import com.litert.server.data.MIN_SERVER_PORT
+import com.litert.server.data.ServerStatus
 import com.litert.server.download.ModelArtifact
 import com.litert.server.service.LLMForegroundService
 
@@ -115,6 +122,9 @@ private fun ServerScreen() {
     var directUrl by rememberSaveable { mutableStateOf("") }
     var huggingFaceToken by remember { mutableStateOf("") }
     var nativeTokens by rememberSaveable { mutableStateOf("") }
+    var servingPortInput by rememberSaveable {
+        mutableStateOf(snapshot.configuredPort.toString())
+    }
     var useGpu by remember { mutableStateOf(snapshot.useGpu) }
     var modelMenuExpanded by remember { mutableStateOf(false) }
 
@@ -122,19 +132,32 @@ private fun ServerScreen() {
         ?: snapshot.models.firstOrNull()
     val activeModel = activeArtifact?.model
     val statusName = snapshot.status.name
-    val isDownloading = statusName == "DOWNLOADING"
-    val isInitializing = statusName == "INITIALIZING"
-    val isRunning = statusName == "RUNNING"
-    val isBusy = isDownloading || isInitializing
+    val isStopped = snapshot.status == ServerStatus.STOPPED
+    val isDownloading = snapshot.status == ServerStatus.DOWNLOADING
+    val isConfiguring = snapshot.status == ServerStatus.CONFIGURING
+    val isInitializing = snapshot.status == ServerStatus.INITIALIZING
+    val isRunning = snapshot.status == ServerStatus.RUNNING
+    val isStopping = snapshot.status == ServerStatus.STOPPING
+    val isBusy = isDownloading || isConfiguring || isInitializing || isStopping
     val canChangeModel = !isBusy && !isRunning
     val isInstalled = activeArtifact?.isInstalled == true
     val validNativeTokens = nativeTokens.toIntOrNull()
-    val endpoint = "http://127.0.0.1:${snapshot.serverPort ?: 8080}"
+    val servingPortDraft = servingPortInput.trim()
+    val validServingPort = servingPortDraft.toIntOrNull()
+        ?.takeIf { it in MIN_SERVER_PORT..MAX_SERVER_PORT }
+    val servingPortMatchesSaved = validServingPort == snapshot.configuredPort
+    val effectivePort = snapshot.serverPort
+        ?: snapshot.configuredPort.takeIf { it in MIN_SERVER_PORT..MAX_SERVER_PORT }
+        ?: DEFAULT_SERVER_PORT
+    val endpoint = "http://127.0.0.1:$effectivePort"
     val modelId = activeModel?.id ?: snapshot.activeModelId ?: "qwen3-0.6b"
     val apiToken = snapshot.apiToken
 
     LaunchedEffect(snapshot.useGpu) {
         useGpu = snapshot.useGpu
+    }
+    LaunchedEffect(snapshot.configuredPort) {
+        servingPortInput = snapshot.configuredPort.toString()
     }
     LaunchedEffect(snapshot.hasHuggingFaceToken) {
         if (snapshot.hasHuggingFaceToken) {
@@ -213,7 +236,8 @@ private fun ServerScreen() {
                                         if (canChangeModel) {
                                             LLMForegroundService.selectModel(context, artifact.model.id)
                                         }
-                                    }
+                                    },
+                                    enabled = canChangeModel
                                 )
                             }
                         }
@@ -325,6 +349,7 @@ private fun ServerScreen() {
                 } else if (activeModel != null && !isInstalled && !isRunning && !isInitializing) {
                     Button(
                         onClick = { LLMForegroundService.downloadSelected(context) },
+                        enabled = canChangeModel,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("Download ${activeModel.displayName}")
@@ -386,7 +411,73 @@ private fun ServerScreen() {
                     Switch(
                         checked = useGpu,
                         onCheckedChange = { useGpu = it },
-                        enabled = !isRunning && !isInitializing
+                        enabled = !isRunning && !isConfiguring && !isInitializing && !isStopping
+                    )
+                }
+            }
+
+            SectionCard("Server settings") {
+                OutlinedTextField(
+                    value = servingPortInput,
+                    onValueChange = {
+                        servingPortInput = it.filter(Char::isDigit)
+                            .take(MAX_SERVER_PORT.toString().length)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = isStopped,
+                    singleLine = true,
+                    label = { Text("Serving port") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = validServingPort == null,
+                    supportingText = {
+                        Text(
+                            when {
+                                validServingPort == null ->
+                                    "Enter a port from $MIN_SERVER_PORT to $MAX_SERVER_PORT."
+                                !servingPortMatchesSaved ->
+                                    "Save this changed port before starting."
+                                else ->
+                                    "The localhost server binds exactly to 127.0.0.1 on this port."
+                            }
+                        )
+                    }
+                )
+                Button(
+                    onClick = {
+                        validServingPort?.let { port ->
+                            LLMForegroundService.setServerPort(context, port)
+                        }
+                    },
+                    enabled = isStopped && validServingPort != null &&
+                        !servingPortMatchesSaved,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Save serving port")
+                }
+                HorizontalDivider()
+                Text(
+                    "API bearer credential",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "Only available while stopped. A successful regeneration replaces the credential for the next server start; update every client. If saving fails, the current credential is retained.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedButton(
+                    onClick = { LLMForegroundService.regenerateApiToken(context) },
+                    enabled = isStopped,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Regenerate API token")
+                }
+                if (isConfiguring) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        "Saving server configuration…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary
                     )
                 }
             }
@@ -400,11 +491,22 @@ private fun ServerScreen() {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(statusLabel(statusName), fontWeight = FontWeight.SemiBold)
                         Text(
-                            if (isRunning) "Listening only on 127.0.0.1"
-                            else "Start explicitly after the model is installed.",
+                            when {
+                                isRunning -> "Listening only on 127.0.0.1"
+                                isConfiguring -> "Saving server settings. Controls are temporarily unavailable."
+                                isStopping -> "Finishing active work and releasing the model."
+                                else -> "Start explicitly after the model is installed."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (isStopping) {
+                            Text(
+                                "Stop stage: ${snapshot.stopStage ?: "waiting for cleanup to start…"}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary
+                            )
+                        }
                         snapshot.backend?.let { backend ->
                             Text(
                                 "Backend: $backend",
@@ -420,7 +522,7 @@ private fun ServerScreen() {
                             )
                         }
                     }
-                    if (isInitializing) {
+                    if (isConfiguring || isInitializing || isStopping) {
                         LinearProgressIndicator(modifier = Modifier.width(72.dp))
                     }
                 }
@@ -430,17 +532,18 @@ private fun ServerScreen() {
                 ) {
                     Button(
                         onClick = { LLMForegroundService.startServer(context, useGpu) },
-                        enabled = isInstalled && !isBusy && !isRunning,
+                        enabled = isInstalled && !isBusy && !isRunning &&
+                            servingPortMatchesSaved,
                         modifier = Modifier.weight(1f)
                     ) {
                         Text("Start")
                     }
                     OutlinedButton(
                         onClick = { LLMForegroundService.stopServer(context) },
-                        enabled = isRunning || isInitializing,
+                        enabled = (isRunning || isInitializing) && !isStopping,
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Stop")
+                        Text(if (isStopping) "Stopping…" else "Stop")
                     }
                 }
             }
@@ -460,14 +563,16 @@ private fun ServerScreen() {
                 CopyableValue("Model", modelId, context)
                 CopyableValue(
                     "API token",
-                    apiToken.ifBlank { "Start the server to load the token" },
+                    apiToken.ifBlank { "Loading API token…" },
                     context,
-                    enabled = apiToken.isNotBlank()
+                    enabled = apiToken.isNotBlank(),
+                    sensitive = true
                 )
                 CopyableValue(
                     "curl",
                     curlCommand(endpoint, modelId, apiToken),
                     context,
+                    sensitive = true,
                     monospace = true
                 )
                 Text(
@@ -525,6 +630,7 @@ private fun CopyableValue(
     value: String,
     context: Context,
     enabled: Boolean = true,
+    sensitive: Boolean = false,
     monospace: Boolean = false
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -534,7 +640,7 @@ private fun CopyableValue(
         ) {
             Text(label, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             TextButton(
-                onClick = { copyToClipboard(context, label, value) },
+                onClick = { copyToClipboard(context, label, value, sensitive) },
                 enabled = enabled
             ) {
                 Text("Copy")
@@ -550,9 +656,15 @@ private fun CopyableValue(
     }
 }
 
-private fun copyToClipboard(context: Context, label: String, value: String) {
+private fun copyToClipboard(context: Context, label: String, value: String, sensitive: Boolean) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+    val clip = ClipData.newPlainText(label, value)
+    if (sensitive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        clip.description.setExtras(PersistableBundle().apply {
+            putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+        })
+    }
+    clipboard.setPrimaryClip(clip)
 }
 
 private fun modelAvailability(artifact: ModelArtifact): String = when {
@@ -563,8 +675,10 @@ private fun modelAvailability(artifact: ModelArtifact): String = when {
 
 private fun statusLabel(statusName: String): String = when (statusName) {
     "DOWNLOADING" -> "Downloading"
+    "CONFIGURING" -> "Configuring"
     "INITIALIZING" -> "Initializing"
     "RUNNING" -> "Running"
+    "STOPPING" -> "Stopping"
     "ERROR" -> "Error"
     else -> "Stopped"
 }
@@ -572,7 +686,7 @@ private fun statusLabel(statusName: String): String = when (statusName) {
 @Composable
 private fun statusColor(statusName: String): Color = when (statusName) {
     "RUNNING" -> MaterialTheme.colorScheme.primary
-    "DOWNLOADING", "INITIALIZING" -> MaterialTheme.colorScheme.tertiary
+    "DOWNLOADING", "CONFIGURING", "INITIALIZING", "STOPPING" -> MaterialTheme.colorScheme.tertiary
     "ERROR" -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.onSurfaceVariant
 }

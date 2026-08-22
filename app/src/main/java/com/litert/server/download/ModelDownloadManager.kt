@@ -103,7 +103,7 @@ object ModelCatalog {
             filename = "gemma-3n-E4B-it-int4.litertlm",
             expectedBytes = 4_919_541_760L,
             contextWindowTokens = 32_768,
-            nativeMaxTokens = 4_096,
+            nativeMaxTokens = 24_576,
             isCustom = false,
             toolPromptProfile = ToolPromptProfile.STRICT_JSON_RELAY
         )

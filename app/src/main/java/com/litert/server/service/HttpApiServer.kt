@@ -1,5 +1,10 @@
 package com.litert.server.service
 
+import android.util.Log
+
+import com.litert.server.data.DEFAULT_SERVER_PORT
+import com.litert.server.data.MAX_SERVER_PORT
+import com.litert.server.data.MIN_SERVER_PORT
 import com.litert.server.download.ToolPromptProfile
 import com.litert.server.data.OaiChatRequest
 import com.litert.server.data.OaiChatResponse
@@ -44,7 +49,15 @@ import io.ktor.server.routing.routing
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -59,10 +72,17 @@ class HttpApiServer(
     private val engine: LiteRTEngine,
     private val apiToken: String,
     private val modelId: String,
-    private val toolPromptProfile: ToolPromptProfile
+    private val toolPromptProfile: ToolPromptProfile = ToolPromptProfile.TAGGED_JSON,
+    private val configuredPort: Int = DEFAULT_SERVER_PORT
 ) {
+    init {
+        require(configuredPort in MIN_SERVER_PORT..MAX_SERVER_PORT) {
+            "Server port must be between $MIN_SERVER_PORT and $MAX_SERVER_PORT"
+        }
+    }
     private var server: ApplicationEngine? = null
-
+    private val generationJobs = ConcurrentHashMap.newKeySet<Job>()
+    private val acceptingGenerations = AtomicBoolean(false)
     var port: Int = 0
         private set
 
@@ -75,9 +95,8 @@ class HttpApiServer(
     fun start(): Int {
         server?.let { return port }
 
-        var lastFailure: Throwable? = null
-        for (candidatePort in 8080..8082) {
-            val candidate = embeddedServer(CIO, host = "127.0.0.1", port = candidatePort) {
+        val candidatePort = configuredPort
+        val candidate = embeddedServer(CIO, host = "127.0.0.1", port = candidatePort) {
                 install(ContentNegotiation) {
                     json(json)
                 }
@@ -186,10 +205,53 @@ class HttpApiServer(
 
                             val strictToolResult = strictToolResultToRelay(request)
                             val prompt = buildPrompt(request, strictToolResult)
-                            if (request.stream) {
-                                streamCompletion(call, request, prompt, temperature, strictToolResult)
-                            } else {
-                                completeRequest(call, request, prompt, temperature, strictToolResult)
+                            if (!acceptingGenerations.get()) {
+                                call.respondError(
+                                    status = HttpStatusCode.ServiceUnavailable,
+                                    message = "The server is stopping",
+                                    type = "server_error",
+                                    code = "server_stopping"
+                                )
+                                return@post
+                            }
+                            val generationJob = coroutineContext[Job]
+                            if (generationJob != null) {
+                                generationJobs.add(generationJob)
+                            }
+                            if (!acceptingGenerations.get()) {
+                                if (generationJob != null) {
+                                    generationJobs.remove(generationJob)
+                                }
+                                call.respondError(
+                                    status = HttpStatusCode.ServiceUnavailable,
+                                    message = "The server is stopping",
+                                    type = "server_error",
+                                    code = "server_stopping"
+                                )
+                                return@post
+                            }
+                            try {
+                                if (request.stream) {
+                                    streamCompletion(
+                                        call,
+                                        request,
+                                        prompt,
+                                        temperature,
+                                        strictToolResult
+                                    )
+                                } else {
+                                    completeRequest(
+                                        call,
+                                        request,
+                                        prompt,
+                                        temperature,
+                                        strictToolResult
+                                    )
+                                }
+                            } finally {
+                                if (generationJob != null) {
+                                    generationJobs.remove(generationJob)
+                                }
                             }
                         }
                     }
@@ -200,14 +262,15 @@ class HttpApiServer(
                 candidate.start(wait = false)
                 server = candidate
                 port = candidatePort
+                acceptingGenerations.set(true)
                 return candidatePort
             } catch (failure: Throwable) {
-                lastFailure = failure
                 runCatching { candidate.stop(0, 0) }
+                throw IllegalStateException(
+                    "Could not bind to 127.0.0.1:$candidatePort",
+                    failure
+                )
             }
-        }
-
-        throw IllegalStateException("Could not bind to a localhost port", lastFailure)
     }
 
     private suspend fun completeRequest(
@@ -730,15 +793,98 @@ class HttpApiServer(
         val arguments: String,
     )
 
-    fun stop() {
-        val active = server ?: return
-        server = null
-        port = 0
-        active.stop(1000, 5000)
+    suspend fun stop(onStage: (String) -> Unit = {}) {
+        acceptingGenerations.set(false)
+        withContext(NonCancellable + Dispatchers.IO) {
+            val active = server
+            server = null
+            port = 0
+            val jobs = generationJobs.toList()
+
+            fun emit(stage: String, detail: String? = null) {
+                val suffix = detail?.let { " $it" }.orEmpty()
+                Log.i(STOP_STAGE_LOG_TAG, "stage=$stage$suffix")
+                try {
+                    onStage(stage)
+                } catch (_: Throwable) {
+                    // Diagnostics must not change cleanup behavior.
+                }
+            }
+
+            emit(STOP_STAGE_ADMISSION, "jobs=${jobs.size}")
+
+            var cleanupFailure: Throwable? = null
+            fun recordFailure(failure: Throwable) {
+                val first = cleanupFailure
+                if (first == null) {
+                    cleanupFailure = failure
+                } else if (first !== failure) {
+                    first.addSuppressed(failure)
+                }
+            }
+
+            emit(STOP_STAGE_NATIVE_DRAIN)
+            repeat(STOP_CANCEL_ATTEMPTS) { attempt ->
+                if (!jobs.any { it.isActive }) return@repeat
+                try {
+                    engine.cancelActiveConversation()
+                } catch (failure: Throwable) {
+                    recordFailure(failure)
+                }
+                if (attempt + 1 < STOP_CANCEL_ATTEMPTS && jobs.any { it.isActive }) {
+                    try {
+                        delay(STOP_CANCEL_INTERVAL_MILLIS)
+                    } catch (failure: Throwable) {
+                        recordFailure(failure)
+                    }
+                }
+            }
+
+            jobs.forEach { job ->
+                try {
+                    job.cancel()
+                } catch (failure: Throwable) {
+                    recordFailure(failure)
+                }
+            }
+            emit(STOP_STAGE_JOBS_CANCELED)
+
+            emit(STOP_STAGE_KTOR_STOP_CALL)
+            try {
+                active?.stop(0, STOP_TIMEOUT_MILLIS)
+            } catch (failure: Throwable) {
+                recordFailure(failure)
+            } finally {
+                emit(STOP_STAGE_KTOR_STOP_RETURNED)
+            }
+
+            emit(STOP_STAGE_JOINS)
+            jobs.forEach { job ->
+                try {
+                    job.join()
+                } catch (failure: Throwable) {
+                    recordFailure(failure)
+                }
+            }
+            emit(STOP_STAGE_COMPLETED)
+
+            cleanupFailure?.let { throw it }
+        }
     }
 
     private companion object {
+        private const val STOP_STAGE_LOG_TAG = "LiteRT-StopStage"
+        private const val STOP_STAGE_ADMISSION = "admission closed; jobs captured"
+        private const val STOP_STAGE_NATIVE_DRAIN = "native drain"
+        private const val STOP_STAGE_JOBS_CANCELED = "jobs canceled"
+        private const val STOP_STAGE_KTOR_STOP_CALL = "Ktor listener stop call"
+        private const val STOP_STAGE_KTOR_STOP_RETURNED = "Ktor listener stop returned"
+        private const val STOP_STAGE_JOINS = "joins"
+        private const val STOP_STAGE_COMPLETED = "completed"
         const val DEFAULT_TEMPERATURE = 0.7
         const val TOOL_CALL_MARKER = "<tool_call>"
+        const val STOP_TIMEOUT_MILLIS = 1_000L
+        const val STOP_CANCEL_INTERVAL_MILLIS = 100L
+        const val STOP_CANCEL_ATTEMPTS = 20
     }
 }

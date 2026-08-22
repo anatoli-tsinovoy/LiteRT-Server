@@ -6,9 +6,14 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.litert.server.data.DEFAULT_SERVER_PORT
+import com.litert.server.data.MAX_SERVER_PORT
+import com.litert.server.data.MIN_SERVER_PORT
 import com.litert.server.data.ServerSnapshot
 import com.litert.server.data.ServerStatus
 import com.litert.server.download.ModelArtifact
@@ -30,6 +35,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.SecureRandom
 import java.util.Base64
@@ -41,7 +48,11 @@ class LLMForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val PREFS_NAME = "litert_server_service"
         private const val PREF_API_TOKEN = "api_token"
+        private const val PREF_SERVER_PORT = "server_port"
         private const val PREF_USE_GPU = "use_gpu"
+
+        private const val STOP_STAGE_LOG_TAG = "LiteRT-StopStage"
+        private const val STOP_STAGE_REQUESTED = "stop requested"
 
         private const val ACTION_REFRESH = "com.litert.server.action.REFRESH"
         private const val ACTION_SELECT_MODEL = "com.litert.server.action.SELECT_MODEL"
@@ -53,6 +64,9 @@ class LLMForegroundService : Service() {
         private const val ACTION_CANCEL_DOWNLOAD = "com.litert.server.action.CANCEL_DOWNLOAD"
         private const val ACTION_START_SERVER = "com.litert.server.action.START_SERVER"
         private const val ACTION_STOP_SERVER = "com.litert.server.action.STOP_SERVER"
+        private const val ACTION_SET_SERVER_PORT = "com.litert.server.action.SET_SERVER_PORT"
+        private const val ACTION_REGENERATE_API_TOKEN =
+            "com.litert.server.action.REGENERATE_API_TOKEN"
         private const val ACTION_DELETE_MODEL = "com.litert.server.action.DELETE_MODEL"
         private const val ACTION_SET_HF_TOKEN = "com.litert.server.action.SET_HF_TOKEN"
 
@@ -60,6 +74,7 @@ class LLMForegroundService : Service() {
         private const val EXTRA_NATIVE_MAX_TOKENS = "native_max_tokens"
         private const val EXTRA_DIRECT_URL = "direct_url"
         private const val EXTRA_USE_GPU = "use_gpu"
+        private const val EXTRA_SERVER_PORT = "server_port"
         private const val EXTRA_HF_TOKEN = "hf_token"
 
         private val mutableState = MutableStateFlow(ServerSnapshot())
@@ -111,6 +126,15 @@ class LLMForegroundService : Service() {
         fun stopServer(context: Context) {
             dispatch(context, ACTION_STOP_SERVER)
         }
+        fun setServerPort(context: Context, port: Int) {
+            dispatch(context, ACTION_SET_SERVER_PORT) {
+                putExtra(EXTRA_SERVER_PORT, port)
+            }
+        }
+
+        fun regenerateApiToken(context: Context) {
+            dispatch(context, ACTION_REGENERATE_API_TOKEN)
+        }
 
         fun deleteModel(context: Context, modelId: String) {
             dispatch(context, ACTION_DELETE_MODEL) {
@@ -139,20 +163,38 @@ class LLMForegroundService : Service() {
     private val preferences by lazy {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
+    private val settingsMutex = Mutex()
+    private var configuredPort = DEFAULT_SERVER_PORT
+
+    private fun updateStopStage(stage: String) {
+        var updated = false
+        mutableState.update { current ->
+            if (current.status != ServerStatus.STOPPING) {
+                current
+            } else {
+                updated = true
+                current.copy(stopStage = stage)
+            }
+        }
+        if (updated) {
+            Log.i(STOP_STAGE_LOG_TAG, "stage=$stage")
+        }
+    }
 
     private lateinit var manager: ModelDownloadManager
     private lateinit var apiToken: String
     private var operationJob: Job? = null
-    private var engine: LiteRTEngine? = null
-    private var apiServer: HttpApiServer? = null
+
     private var destroying = false
 
     override fun onCreate() {
         super.onCreate()
         manager = ModelDownloadManager(applicationContext)
+        configuredPort = getOrMigrateServerPort()
         apiToken = getOrCreateApiToken()
         mutableState.update {
             it.copy(
+                configuredPort = configuredPort,
                 apiToken = apiToken,
                 useGpu = preferences.getBoolean(PREF_USE_GPU, true)
             )
@@ -179,6 +221,12 @@ class LLMForegroundService : Service() {
             ACTION_SET_HF_TOKEN -> serviceScope.launch {
                 handleSetHuggingFaceToken(command.getStringExtra(EXTRA_HF_TOKEN))
             }
+            ACTION_SET_SERVER_PORT -> serviceScope.launch {
+                handleSetServerPort(command.getIntExtra(EXTRA_SERVER_PORT, Int.MIN_VALUE))
+            }
+            ACTION_REGENERATE_API_TOKEN -> serviceScope.launch {
+                handleRegenerateApiToken()
+            }
             ACTION_ADD_AND_DOWNLOAD -> {
                 if (!isServerOrInitializationBusy() && operationJob?.isActive != true) {
                     startAsForeground(
@@ -201,7 +249,11 @@ class LLMForegroundService : Service() {
             }
             ACTION_CANCEL_DOWNLOAD -> serviceScope.launch { handleCancelDownload() }
             ACTION_START_SERVER -> {
-                if (!isDownloadBusy() && operationJob?.isActive != true) {
+                if (
+                    mutableState.value.status != ServerStatus.DOWNLOADING &&
+                    !isServerOrInitializationBusy() &&
+                    operationJob?.isActive != true
+                ) {
                     startAsForeground(
                         android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
                         "Starting LiteRT server…"
@@ -254,6 +306,7 @@ class LLMForegroundService : Service() {
     }
 
     private suspend fun handleSetHuggingFaceToken(token: String?) {
+        if (!modelMutationAllowed()) return
         try {
             withContext(Dispatchers.IO) {
                 manager.setHuggingFaceToken(token)
@@ -262,6 +315,99 @@ class LLMForegroundService : Service() {
             clearCommandError()
         } catch (t: Throwable) {
             setCommandError(errorMessage(t, "Unable to save Hugging Face token"))
+        }
+    }
+    private suspend fun handleSetServerPort(port: Int) {
+        settingsMutex.withLock {
+            if (!configurationMutationAllowed()) return
+            if (port !in MIN_SERVER_PORT..MAX_SERVER_PORT) {
+                setCommandError(
+                    "Server port must be between $MIN_SERVER_PORT and $MAX_SERVER_PORT"
+                )
+                return
+            }
+            val oldPort = configuredPort
+            val hadPersistedPort = preferences.contains(PREF_SERVER_PORT)
+            mutableState.update {
+                it.copy(
+                    status = ServerStatus.CONFIGURING,
+                    error = null
+                )
+            }
+            try {
+                val committed = withContext(Dispatchers.IO) {
+                    preferences.edit().putInt(PREF_SERVER_PORT, port).commit()
+                }
+                check(committed) { "Unable to persist server port" }
+                configuredPort = port
+                mutableState.update {
+                    it.copy(
+                        status = ServerStatus.STOPPED,
+                        configuredPort = port,
+                        serverPort = null,
+                        error = null,
+                        stopStage = null
+                    )
+                }
+            } catch (t: Throwable) {
+                runCatching {
+                    restorePreference(PREF_SERVER_PORT, hadPersistedPort) { editor ->
+                        editor.putInt(PREF_SERVER_PORT, oldPort)
+                    }
+                }
+                mutableState.update {
+                    it.copy(
+                        status = ServerStatus.STOPPED,
+                        error = errorMessage(t, "Unable to save server port"),
+                        stopStage = null
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun handleRegenerateApiToken() {
+        settingsMutex.withLock {
+            if (!configurationMutationAllowed()) return
+            val oldToken = apiToken
+            val hadPersistedToken = preferences.contains(PREF_API_TOKEN)
+            mutableState.update {
+                it.copy(
+                    status = ServerStatus.CONFIGURING,
+                    error = null
+                )
+            }
+            try {
+                val candidate = withContext(Dispatchers.IO) {
+                    val generated = generateApiToken()
+                    check(
+                        preferences.edit().putString(PREF_API_TOKEN, generated).commit()
+                    ) { "Unable to persist API token" }
+                    generated
+                }
+                apiToken = candidate
+                mutableState.update {
+                    it.copy(
+                        status = ServerStatus.STOPPED,
+                        apiToken = candidate,
+                        error = null,
+                        stopStage = null
+                    )
+                }
+            } catch (t: Throwable) {
+                runCatching {
+                    restorePreference(PREF_API_TOKEN, hadPersistedToken) { editor ->
+                        editor.putString(PREF_API_TOKEN, oldToken)
+                    }
+                }
+                mutableState.update {
+                    it.copy(
+                        status = ServerStatus.STOPPED,
+                        error = errorMessage(t, "Unable to regenerate API token"),
+                        stopStage = null
+                    )
+                }
+            }
         }
     }
 
@@ -311,7 +457,8 @@ class LLMForegroundService : Service() {
                 download = null,
                 error = null,
                 serverPort = null,
-                backend = null
+                backend = null,
+                stopStage = null
             )
         }
         launchOperation { runDownload(model) }
@@ -336,14 +483,19 @@ class LLMForegroundService : Service() {
                     status = ServerStatus.STOPPED,
                     activeModelId = model.id,
                     download = null,
-                    error = null
+                    error = null,
+                    stopStage = null
                 )
             }
             refreshModelSnapshot()
         } catch (cancelled: CancellationException) {
             mutableState.update {
                 if (it.status == ServerStatus.DOWNLOADING) {
-                    it.copy(status = ServerStatus.STOPPED, download = null)
+                    it.copy(
+                        status = ServerStatus.STOPPED,
+                        download = null,
+                        stopStage = null
+                    )
                 } else {
                     it
                 }
@@ -388,83 +540,109 @@ class LLMForegroundService : Service() {
                 serverPort = null,
                 backend = null,
                 backendError = null,
-                useGpu = useGpu
+                useGpu = useGpu,
+                stopStage = null
             )
         }
-        launchOperation { runServer(model, artifact, useGpu) }
+        val selectedPort = configuredPort
+        val selectedApiToken = apiToken
+        launchOperation {
+            runServer(
+                model = model,
+                artifact = artifact,
+                useGpu = useGpu,
+                serverPort = selectedPort,
+                serverToken = selectedApiToken
+            )
+        }
     }
 
     private suspend fun runServer(
         model: ModelDescriptor,
         artifact: ModelArtifact,
-        useGpu: Boolean
+        useGpu: Boolean,
+        serverPort: Int,
+        serverToken: String
     ) {
-        var failure: Throwable? = null
-        val localEngine = LiteRTEngine(applicationContext)
-        engine = localEngine
+        var localEngine: LiteRTEngine? = null
+        var localServer: HttpApiServer? = null
         try {
-            val initialized = withContext(Dispatchers.IO) {
-                localEngine.initialize(artifact.path, useGpu, model.nativeMaxTokens)
-            }
-            if (initialized.isFailure) {
+            val createdEngine = LiteRTEngine(applicationContext)
+            localEngine = createdEngine
+            val initialized =
+                withContext(Dispatchers.IO) {
+                    createdEngine.initialize(artifact.path, useGpu, model.nativeMaxTokens)
+                }
+            if (initialized.isFailure || !createdEngine.isReady) {
                 throw initialized.exceptionOrNull()
                     ?: IllegalStateException("LiteRT engine initialization failed")
             }
-            val localServer =
+
+            val server =
                 HttpApiServer(
-                    engine = localEngine,
-                    apiToken = apiToken,
+                    engine = createdEngine,
+                    apiToken = serverToken,
                     modelId = model.id,
-                    toolPromptProfile = model.toolPromptProfile
+                    toolPromptProfile = model.toolPromptProfile,
+                    configuredPort = serverPort
                 )
-            apiServer = localServer
-            val port = withContext(Dispatchers.IO) { localServer.start() }
-            mutableState.update {
-                it.copy(
-                    status = ServerStatus.RUNNING,
-                    activeModelId = model.id,
-                    serverPort = port,
-                    backend = localEngine.backend,
-                    backendError = localEngine.gpuFallbackReason,
-                    error = null,
-                    useGpu = useGpu
-                )
+            localServer = server
+            val port = withContext(Dispatchers.IO) { server.start() }
+            mutableState.update { current ->
+                if (current.status == ServerStatus.STOPPING) {
+                    current
+                } else {
+                    current.copy(
+                        status = ServerStatus.RUNNING,
+                        activeModelId = model.id,
+                        serverPort = port,
+                        backend = createdEngine.backend,
+                        backendError = createdEngine.gpuFallbackReason,
+                        error = null,
+                        useGpu = useGpu,
+                        stopStage = null
+                    )
+                }
+            }
+            if (mutableState.value.status != ServerStatus.RUNNING) {
+                throw CancellationException()
             }
             updateNotification(
-                "LiteRT Server running on 127.0.0.1:$port (${localEngine.backend})"
+                "LiteRT Server running on 127.0.0.1:$port (${createdEngine.backend})"
             )
             awaitCancellation()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (t: Throwable) {
-            failure = t
-            setOperationError(errorMessage(t, "Unable to start LiteRT server"))
+            if (mutableState.value.status != ServerStatus.STOPPING) {
+                setOperationError(errorMessage(t, "Unable to start LiteRT server"))
+            }
         } finally {
-            withContext(NonCancellable + Dispatchers.IO) {
-                val server = apiServer
-                apiServer = null
-                try {
-                    server?.stop()
-                } catch (_: Throwable) {
+            withContext(NonCancellable) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        localServer?.stop(::updateStopStage)
+                    } catch (_: Throwable) {
+                    }
+                    updateStopStage("Shutting down model engine")
+                    try {
+                        localEngine?.shutdown()
+                    } catch (_: Throwable) {
+                    }
                 }
-                val activeEngine = engine
-                engine = null
-                try {
-                    activeEngine?.shutdown()
-                } catch (_: Throwable) {
+                if (!destroying) {
+                    mutableState.update {
+                        it.copy(
+                            status = ServerStatus.STOPPED,
+                            serverPort = null,
+                            backendError = null,
+                            backend = null,
+                            stopStage = null
+                        )
+                    }
+                    stopForegroundIfIdle()
                 }
             }
-            if (failure == null && !destroying) {
-                mutableState.update {
-                    it.copy(
-                        status = ServerStatus.STOPPED,
-                        serverPort = null,
-                        backendError = null,
-                        backend = null
-                    )
-                }
-            }
-            if (!destroying) stopForegroundIfIdle()
         }
     }
 
@@ -476,7 +654,19 @@ class LLMForegroundService : Service() {
     private suspend fun handleStopServer() {
         when (mutableState.value.status) {
             ServerStatus.INITIALIZING,
-            ServerStatus.RUNNING -> operationJob?.cancel()
+            ServerStatus.RUNNING -> {
+                mutableState.update {
+                    it.copy(
+                        status = ServerStatus.STOPPING,
+                        error = null
+                    )
+                }
+                updateStopStage(STOP_STAGE_REQUESTED)
+                updateNotification("Stopping LiteRT server…")
+                operationJob?.cancel()
+            }
+            ServerStatus.STOPPING -> Unit
+            ServerStatus.CONFIGURING -> Unit
             ServerStatus.ERROR -> {
                 if (operationJob?.isActive != true) {
                     mutableState.update {
@@ -485,7 +675,8 @@ class LLMForegroundService : Service() {
                             error = null,
                             serverPort = null,
                             backend = null,
-                            backendError = null
+                            backendError = null,
+                            stopStage = null
                         )
                     }
                     stopForegroundIfIdle()
@@ -522,6 +713,7 @@ class LLMForegroundService : Service() {
                 it.copy(
                     models = models,
                     activeModelId = active.id,
+                    configuredPort = configuredPort,
                     apiToken = apiToken,
                     useGpu = preferences.getBoolean(PREF_USE_GPU, true),
                     hasHuggingFaceToken = manager.hasHuggingFaceToken(),
@@ -533,8 +725,10 @@ class LLMForegroundService : Service() {
     }
 
     private fun beginDownloadOperation(): Boolean {
-        if (mutableState.value.status == ServerStatus.RUNNING ||
+        if (mutableState.value.status == ServerStatus.CONFIGURING ||
+            mutableState.value.status == ServerStatus.RUNNING ||
             mutableState.value.status == ServerStatus.INITIALIZING ||
+            mutableState.value.status == ServerStatus.STOPPING ||
             operationJob?.isActive == true
         ) {
             setCommandError("Stop the server before changing or downloading models")
@@ -554,6 +748,12 @@ class LLMForegroundService : Service() {
     }
 
     private fun beginServerOperation(): Boolean {
+        if (mutableState.value.status == ServerStatus.CONFIGURING ||
+            mutableState.value.status == ServerStatus.STOPPING
+        ) {
+            setCommandError("Wait for the server to stop configuring before starting")
+            return false
+        }
         if (mutableState.value.status == ServerStatus.DOWNLOADING ||
             operationJob?.isActive == true
         ) {
@@ -569,10 +769,22 @@ class LLMForegroundService : Service() {
         return true
     }
 
+    private fun configurationMutationAllowed(): Boolean {
+        if (mutableState.value.status != ServerStatus.STOPPED ||
+            operationJob?.isActive == true
+        ) {
+            setCommandError("Stop the server before changing server settings")
+            return false
+        }
+        return true
+    }
+
     private fun modelMutationAllowed(): Boolean {
-        if (mutableState.value.status == ServerStatus.DOWNLOADING ||
+        if (mutableState.value.status == ServerStatus.CONFIGURING ||
+            mutableState.value.status == ServerStatus.DOWNLOADING ||
             mutableState.value.status == ServerStatus.INITIALIZING ||
             mutableState.value.status == ServerStatus.RUNNING ||
+            mutableState.value.status == ServerStatus.STOPPING ||
             operationJob?.isActive == true
         ) {
             setCommandError("Stop the server and wait for downloads before changing models")
@@ -582,18 +794,16 @@ class LLMForegroundService : Service() {
     }
 
     private fun isServerOrInitializationBusy(): Boolean =
-        mutableState.value.status == ServerStatus.RUNNING ||
-            mutableState.value.status == ServerStatus.INITIALIZING
-
-    private fun isDownloadBusy(): Boolean =
-        mutableState.value.status == ServerStatus.DOWNLOADING
-
+        mutableState.value.status == ServerStatus.CONFIGURING ||
+            mutableState.value.status == ServerStatus.RUNNING ||
+            mutableState.value.status == ServerStatus.INITIALIZING ||
+            mutableState.value.status == ServerStatus.STOPPING
     private fun finishRejectedOperation() {
         operationJob = null
         if (mutableState.value.status == ServerStatus.DOWNLOADING ||
             mutableState.value.status == ServerStatus.INITIALIZING
         ) {
-            mutableState.update { it.copy(status = ServerStatus.ERROR) }
+            mutableState.update { it.copy(status = ServerStatus.ERROR, stopStage = null) }
         }
         stopForegroundIfIdle()
     }
@@ -614,7 +824,7 @@ class LLMForegroundService : Service() {
     private fun setCommandError(message: String) {
         mutableState.update {
             if (it.status == ServerStatus.STOPPED) {
-                it.copy(status = ServerStatus.ERROR, error = message)
+                it.copy(status = ServerStatus.ERROR, error = message, stopStage = null)
             } else {
                 it.copy(error = message)
             }
@@ -624,11 +834,25 @@ class LLMForegroundService : Service() {
     private fun clearCommandError() {
         mutableState.update {
             if (it.status == ServerStatus.ERROR) {
-                it.copy(status = ServerStatus.STOPPED, error = null)
+                it.copy(status = ServerStatus.STOPPED, error = null, stopStage = null)
             } else {
                 it.copy(error = null)
             }
         }
+    }
+
+    private fun restorePreference(
+        key: String,
+        hadPersistedValue: Boolean,
+        restoreValue: (SharedPreferences.Editor) -> Unit,
+    ) {
+        val editor = preferences.edit()
+        if (hadPersistedValue) {
+            restoreValue(editor)
+        } else {
+            editor.remove(key)
+        }
+        editor.commit()
     }
 
     private fun setOperationError(message: String) {
@@ -638,7 +862,8 @@ class LLMForegroundService : Service() {
                 error = message,
                 serverPort = null,
                 backendError = null,
-                backend = null
+                backend = null,
+                stopStage = null
             )
         }
     }
@@ -653,9 +878,11 @@ class LLMForegroundService : Service() {
     }
 
     private fun stopForegroundIfIdle() {
-        if (mutableState.value.status != ServerStatus.DOWNLOADING &&
+        if (mutableState.value.status != ServerStatus.CONFIGURING &&
+            mutableState.value.status != ServerStatus.DOWNLOADING &&
             mutableState.value.status != ServerStatus.INITIALIZING &&
-            mutableState.value.status != ServerStatus.RUNNING
+            mutableState.value.status != ServerStatus.RUNNING &&
+            mutableState.value.status != ServerStatus.STOPPING
         ) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
@@ -685,13 +912,39 @@ class LLMForegroundService : Service() {
             .notify(NOTIFICATION_ID, buildNotification(text))
     }
 
+    private fun getOrMigrateServerPort(): Int {
+        val raw = runCatching { preferences.all[PREF_SERVER_PORT] }.getOrNull()
+        val persisted = when (raw) {
+            is Number -> raw.toString().toIntOrNull()
+            is String -> raw.trim().toIntOrNull()
+            else -> null
+        }
+        val normalized = persisted?.takeIf {
+            it in MIN_SERVER_PORT..MAX_SERVER_PORT
+        } ?: DEFAULT_SERVER_PORT
+        if (raw !is Int || raw != normalized) {
+            check(
+                preferences.edit().putInt(PREF_SERVER_PORT, normalized).commit()
+            ) { "Unable to persist default server port" }
+        }
+        return normalized
+    }
+
     private fun getOrCreateApiToken(): String {
-        preferences.getString(PREF_API_TOKEN, null)?.takeIf { it.isNotBlank() }?.let { return it }
+        val persisted =
+            (runCatching { preferences.all[PREF_API_TOKEN] }.getOrNull() as? String)
+        if (!persisted.isNullOrBlank()) return persisted
+        val candidate = generateApiToken()
+        check(
+            preferences.edit().putString(PREF_API_TOKEN, candidate).commit()
+        ) { "Unable to persist API token" }
+        return candidate
+    }
+
+    private fun generateApiToken(): String {
         val bytes = ByteArray(24)
         SecureRandom().nextBytes(bytes)
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes).also {
-            preferences.edit().putString(PREF_API_TOKEN, it).apply()
-        }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     }
 
     private fun errorMessage(t: Throwable, fallback: String): String =
@@ -715,7 +968,8 @@ class LLMForegroundService : Service() {
                 download = null,
                 serverPort = null,
                 backend = null,
-                backendError = null
+                backendError = null,
+                stopStage = null
             )
         }
         serviceScope.cancel()
