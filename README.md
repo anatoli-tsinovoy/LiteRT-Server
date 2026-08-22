@@ -22,8 +22,8 @@ adb shell am start -n com.litert.server/.MainActivity
 
 The app has one screen:
 
-1. Select the built-in Qwen3 0.6B model, or paste a direct Hugging Face
-   `https://huggingface.co/.../resolve/.../*.litertlm` URL.
+1. Select the built-in Qwen3 0.6B or Gemma 3n E4B model, or paste a direct
+   Hugging Face `https://huggingface.co/.../resolve/.../*.litertlm` URL.
 2. Download the model. Interrupted downloads resume from the validated partial
    file.
 3. Set the native context limit and GPU preference.
@@ -38,6 +38,14 @@ The built-in test model is the pinned 474.61 MiB
 [`litert-community/Qwen3-0.6B`](https://huggingface.co/litert-community/Qwen3-0.6B)
 mixed INT4 artifact with a 2048-token native context. This artifact has
 published LiteRT-LM 0.13.1 OpenCL GPU results.
+
+The larger built-in model is the pinned 4,919,541,760-byte
+[`google/gemma-3n-E4B-it-litert-lm`](https://huggingface.co/google/gemma-3n-E4B-it-litert-lm)
+INT4 artifact. It advertises a 32K context and defaults to a 4096-token native
+limit on this 16 GB Snapdragon 8 Gen 3 device. The repository is gated: accept
+the Gemma license, create a Hugging Face token with public-gated-repository read
+access, and save it in the app before downloading. The app encrypts the token
+with Android Keystore and only attaches it to Hugging Face requests.
 
 Models live in app-private external storage under
 `[ExternalFilesDir]/models/<model-id>/`.
@@ -119,8 +127,9 @@ omp --model litert-server/qwen3-0.6b
 - Engine start is explicit and idempotent across Activity recreation.
 - GPU initialization falls back to CPU when unavailable and exposes the native
   fallback reason in the app and `/health`.
-- OpenAI function tools are returned as `tool_calls`; tool results can be sent
-  back for the next serialized model turn.
+- OpenAI function tools are returned as `tool_calls`. Qwen uses the tagged tool
+  protocol; Gemma uses a stricter bare-JSON protocol and relays completed tool
+  results verbatim to avoid corrupting command or file output.
 - Server inference is serialized to protect the native engine.
 - Download and inference work run off the Android main thread.
 - Android backup is disabled; the API never binds beyond localhost.

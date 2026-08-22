@@ -158,8 +158,12 @@ class HttpApiServer(
                                 return@post
                             }
                             val temperature =
-                                request.temperature
-                                    ?: if (toolsEnabled(request)) 0.0 else DEFAULT_TEMPERATURE
+                                if (usesGemmaToolProtocol() && toolsEnabled(request)) {
+                                    0.0
+                                } else {
+                                    request.temperature
+                                        ?: if (toolsEnabled(request)) 0.0 else DEFAULT_TEMPERATURE
+                                }
                             if (!temperature.isFinite() || temperature < 0.0 || temperature > 2.0) {
                                 call.respondError(
                                     status = HttpStatusCode.BadRequest,
@@ -210,10 +214,18 @@ class HttpApiServer(
         temperature: Double
     ) {
         val output = StringBuilder()
-        val usage = engine.generate(prompt, temperature) { chunk ->
-            output.append(chunk)
-        }
-        val toolCall = parseToolCall(output.toString(), request)
+        val completedToolResult = completedGemmaToolResult(request)
+        val usage =
+            if (completedToolResult != null) {
+                output.append(completedToolResult)
+                OaiUsage(promptTokens = 0, completionTokens = 0, totalTokens = 0)
+            } else {
+                engine.generate(prompt, temperature) { chunk ->
+                    output.append(chunk)
+                }.toOaiUsage()
+            }
+        val toolCall =
+            if (completedToolResult == null) parseToolCall(output.toString(), request) else null
         val message =
             if (toolCall != null) {
                 OaiMessage(
@@ -246,7 +258,7 @@ class HttpApiServer(
                             finishReason = if (toolCall != null) "tool_calls" else "stop",
                         )
                     ),
-                usage = usage.toOaiUsage(),
+                usage = usage,
             )
         )
     }
@@ -282,11 +294,22 @@ class HttpApiServer(
 
             try {
                 val output = StringBuilder()
+                val completedToolResult = completedGemmaToolResult(request)
                 val usage =
-                    engine.generate(prompt, temperature) { chunk ->
-                        output.append(chunk)
-                    }.toOaiUsage()
-                val toolCall = parseToolCall(output.toString(), request)
+                    if (completedToolResult != null) {
+                        output.append(completedToolResult)
+                        OaiUsage(promptTokens = 0, completionTokens = 0, totalTokens = 0)
+                    } else {
+                        engine.generate(prompt, temperature) { chunk ->
+                            output.append(chunk)
+                        }.toOaiUsage()
+                    }
+                val toolCall =
+                    if (completedToolResult == null) {
+                        parseToolCall(output.toString(), request)
+                    } else {
+                        null
+                    }
                 val delta =
                     if (toolCall != null) {
                         OaiDelta(
@@ -370,6 +393,10 @@ class HttpApiServer(
 
     private fun buildPrompt(request: OaiChatRequest): String {
         val sections = ArrayList<String>(request.messages.size + 3)
+        val toolsEnabled = toolsEnabled(request)
+        val gemmaToolProtocol = toolsEnabled && usesGemmaToolProtocol()
+        val hasToolResult =
+            request.messages.any { it.role.equals("tool", ignoreCase = true) }
         val toolNameById =
             request.messages
                 .flatMap { it.toolCalls.orEmpty() }
@@ -379,7 +406,7 @@ class HttpApiServer(
                 .filter { it.role.equals("tool", ignoreCase = true) }
                 .mapNotNull { it.toolCallId?.let(toolNameById::get) }
                 .distinct()
-        if (toolsEnabled(request)) {
+        if (toolsEnabled && !(gemmaToolProtocol && hasToolResult)) {
             val definitions =
                 request.tools
                     .orEmpty()
@@ -410,22 +437,73 @@ class HttpApiServer(
             sections += if (body.isNotBlank()) "$displayRole: $body" else "$displayRole:"
         }
 
-        if (completedToolNames.isNotEmpty()) {
-            sections +=
-                "Completed tools: ${completedToolNames.joinToString(", ")}. " +
-                    "Continue with the next requested action; do not repeat a completed tool " +
-                    "unless the user explicitly requested repetition."
-        }
-
-        if (toolsEnabled(request)) {
-            sections +=
-                "To call a tool, output only " +
-                    "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>. " +
-                    "Call exactly one tool at a time. Do not use Markdown around a tool call. " +
-                    "When no tool is needed, answer normally."
+        when {
+            gemmaToolProtocol && hasToolResult -> {
+                sections +=
+                    "A tool has already executed. Your entire response must be only the exact text " +
+                        "from the completed tool-result message above, then stop. Copy every character; " +
+                        "repeated words and path components such as /data/data are intentional and " +
+                        "must remain repeated. If the tool result is an error, repeat that error " +
+                        "exactly; do not invent a successful result, retry, call another tool, or " +
+                        "infer file contents or command output. Do not output Markdown or a JSON " +
+                        "tool-call object."
+            }
+            gemmaToolProtocol -> {
+                sections +=
+                    "You have executable function tools. If the user asks to read a file, run a " +
+                        "command, or obtain information available only through a listed tool, you " +
+                        "must call the matching tool and must not invent the result. Copy every " +
+                        "argument value character-for-character from the user's request. Keep relative " +
+                        "paths relative. Never prepend, normalize, or append punctuation to a path. " +
+                        "Repeated path components such as /data/data are intentional. Include required " +
+                        "arguments and arguments explicitly requested by the user; omit all other " +
+                        "optional arguments. To call a tool, output exactly one JSON object in this " +
+                        "form: {\"name\":\"tool_name\",\"arguments\":{\"argument_name\":\"value\"}}. " +
+                        "Use the exact tool and argument names listed above. Output no Markdown, " +
+                        "explanation, or other text around the JSON object. Call exactly one tool at " +
+                        "a time."
+                if (request.tools.orEmpty().any { it.function.name == "read" }) {
+                    sections +=
+                        "Read example: if the requested path is local.properties, output exactly " +
+                            "{\"name\":\"read\",\"arguments\":{\"path\":\"local.properties\"}}."
+                }
+                if (request.tools.orEmpty().any { it.function.name == "bash" }) {
+                    sections +=
+                        "Bash example: if asked to run ls in /tmp, output exactly " +
+                            "{\"name\":\"bash\",\"arguments\":{\"i\":\"Listing files\"," +
+                            "\"command\":\"ls\",\"cwd\":\"/tmp\"}}. Copy the requested command and " +
+                            "cwd exactly; do not add env, timeout, pty, or async unless requested."
+                }
+            }
+            else -> {
+                if (completedToolNames.isNotEmpty()) {
+                    sections +=
+                        "Completed tools: ${completedToolNames.joinToString(", ")}. " +
+                            "Continue with the next requested action; do not repeat a completed tool " +
+                            "unless the user explicitly requested repetition."
+                }
+                if (toolsEnabled) {
+                    sections +=
+                        "To call a tool, output only " +
+                            "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>. " +
+                            "Call exactly one tool at a time. Do not use Markdown around a tool call. " +
+                            "When no tool is needed, answer normally."
+                }
+            }
         }
         sections += "assistant:"
         return sections.joinToString("\n\n")
+    }
+
+    private fun usesGemmaToolProtocol(): Boolean =
+        modelId.startsWith("gemma", ignoreCase = true)
+
+    private fun completedGemmaToolResult(request: OaiChatRequest): String? {
+        if (!usesGemmaToolProtocol()) return null
+        return request.messages
+            .lastOrNull { it.role.equals("tool", ignoreCase = true) }
+            ?.content
+            ?.toPromptText()
     }
 
     private fun compactToolDefinition(tool: OaiTool): String {

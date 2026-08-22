@@ -5,6 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val liteRtLmVersion = "0.13.1"
+
 android {
     namespace = "com.litert.server"
     compileSdk = 35
@@ -14,6 +16,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        buildConfigField("String", "LITERT_LM_VERSION", "\"$liteRtLmVersion\"")
     }
     buildTypes {
         release {
@@ -25,7 +28,10 @@ android {
             )
         }
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -43,7 +49,7 @@ android {
 
 dependencies {
     // LiteRT-LM SDK
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.13.1")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:$liteRtLmVersion")
 
     // Ktor HTTP server (CIO engine)
     val ktor_version = "2.3.12"

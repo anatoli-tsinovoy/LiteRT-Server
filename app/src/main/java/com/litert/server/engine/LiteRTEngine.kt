@@ -2,6 +2,7 @@ package com.litert.server.engine
 
 import android.content.Context
 import android.util.Log
+import com.litert.server.BuildConfig
 import com.google.ai.edge.litertlm.LogSeverity
 import java.io.File
 import com.google.ai.edge.litertlm.Backend
@@ -221,6 +222,7 @@ class LiteRTEngine(private val context: Context) {
         ExperimentalFlags.enableBenchmark = true
     }
 
+
     @OptIn(ExperimentalApi::class)
     private fun usageFor(
         conversation: Conversation,
@@ -245,7 +247,10 @@ class LiteRTEngine(private val context: Context) {
     }
 
     private fun backendCacheDir(backend: String): String =
-        File(context.cacheDir, "litert/${backend.lowercase()}").apply {
+        File(
+            context.cacheDir,
+            "litert/${BuildConfig.LITERT_LM_VERSION}/${backend.lowercase()}",
+        ).apply {
             check(isDirectory || mkdirs()) { "Unable to create LiteRT $backend cache directory" }
         }.absolutePath
 

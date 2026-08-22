@@ -1,6 +1,8 @@
 package com.litert.server.download
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -17,14 +19,25 @@ import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URI
+import java.security.KeyStore
+import java.util.Base64
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 private const val DEFAULT_NATIVE_MAX_TOKENS = 4_096
 private const val MIN_NATIVE_MAX_TOKENS = 512
 private const val MAX_NATIVE_MAX_TOKENS = 128_000
 private const val PREFS_NAME = "model_registry"
 private const val PREF_REGISTRY = "registry"
+private const val PREF_HF_TOKEN_CIPHERTEXT = "hf_token_ciphertext"
+private const val PREF_HF_TOKEN_IV = "hf_token_iv"
+private const val HF_TOKEN_KEY_ALIAS = "litert_server_hf_token"
+private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+private const val HUGGING_FACE_HOST = "huggingface.co"
 private const val MODEL_DIRECTORY = "models"
 private const val BUFFER_SIZE = 64 * 1024
 private const val PROGRESS_INTERVAL_MILLIS = 1_000L
@@ -68,11 +81,21 @@ object ModelCatalog {
             displayName = "Qwen3 0.6B",
             description = "0.6B · GPU-tested LiteRT-LM · 2K context",
             downloadUrl = "https://huggingface.co/litert-community/Qwen3-0.6B/resolve/8414150f2e9dcc82449bcc9c5abc404b399a4d06/qwen3_0_6b_mixed_int4.litertlm",
-            // Keep the prior internal filename so downloading this catalog upgrade replaces it.
             filename = "Qwen3-0.6B_dynamic_wi4b32_afp32.litertlm",
             expectedBytes = 497_664_000L,
             contextWindowTokens = 2_048,
             nativeMaxTokens = 2_048,
+            isCustom = false
+        ),
+        ModelDescriptor(
+            id = "gemma-3n-e4b-it",
+            displayName = "Gemma 3n E4B",
+            description = "4B effective · INT4 · GPU-tested on Snapdragon 8 Gen 3 · gated",
+            downloadUrl = "https://huggingface.co/google/gemma-3n-E4B-it-litert-lm/resolve/297ed75955702dec3503e00c2c2ecbbf475300bc/gemma-3n-E4B-it-int4.litertlm",
+            filename = "gemma-3n-E4B-it-int4.litertlm",
+            expectedBytes = 4_919_541_760L,
+            contextWindowTokens = 32_768,
+            nativeMaxTokens = 4_096,
             isCustom = false
         )
     )
@@ -141,6 +164,42 @@ class ModelDownloadManager(private val context: Context) {
         val bounded = value.coerceIn(lowerBound, upperBound)
         registry = registry.copy(nativeMaxTokens = registry.nativeMaxTokens + (modelId to bounded))
         saveRegistry()
+    }
+
+    fun hasHuggingFaceToken(): Boolean {
+        val plaintext = decryptHuggingFaceTokenBytes() ?: return false
+        return try {
+            plaintext.any { byte -> byte.toInt() > 0x20 }
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    fun setHuggingFaceToken(token: String?) {
+        val normalized = token?.trim().orEmpty()
+        if (normalized.isEmpty()) {
+            prefs.edit()
+                .remove(PREF_HF_TOKEN_CIPHERTEXT)
+                .remove(PREF_HF_TOKEN_IV)
+                .apply()
+            return
+        }
+
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateHuggingFaceTokenKey())
+        val plaintext = normalized.toByteArray(Charsets.UTF_8)
+        val ciphertext = try {
+            cipher.doFinal(plaintext)
+        } finally {
+            plaintext.fill(0)
+        }
+        prefs.edit()
+            .putString(
+                PREF_HF_TOKEN_CIPHERTEXT,
+                Base64.getEncoder().encodeToString(ciphertext),
+            )
+            .putString(PREF_HF_TOKEN_IV, Base64.getEncoder().encodeToString(cipher.iv))
+            .apply()
     }
 
     suspend fun addCustomModel(directUrl: String): ModelDescriptor = withContext(Dispatchers.IO) {
@@ -484,9 +543,60 @@ class ModelDownloadManager(private val context: Context) {
         return File(root, sanitizeFilename(model.id))
     }
 
-    private fun requestBuilder(url: String): Request.Builder = Request.Builder()
-        .url(url)
-        .header("User-Agent", "LiteRT-Server-Android/1.0")
+    private fun requestBuilder(url: String): Request.Builder {
+        val builder = Request.Builder()
+            .url(url)
+            .header("User-Agent", "LiteRT-Server-Android/1.0")
+        if (URI(url).host.equals(HUGGING_FACE_HOST, ignoreCase = true)) {
+            decryptHuggingFaceToken()?.let { token ->
+                builder.header("Authorization", "Bearer $token")
+            }
+        }
+        return builder
+    }
+
+    private fun decryptHuggingFaceToken(): String? {
+        val plaintext = decryptHuggingFaceTokenBytes() ?: return null
+        return try {
+            plaintext.toString(Charsets.UTF_8).takeIf { it.isNotBlank() }
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    private fun decryptHuggingFaceTokenBytes(): ByteArray? {
+        val encodedCiphertext = prefs.getString(PREF_HF_TOKEN_CIPHERTEXT, null) ?: return null
+        val encodedIv = prefs.getString(PREF_HF_TOKEN_IV, null) ?: return null
+        return runCatching {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val key = keyStore.getKey(HF_TOKEN_KEY_ALIAS, null) as? SecretKey ?: return null
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                key,
+                GCMParameterSpec(128, Base64.getDecoder().decode(encodedIv)),
+            )
+            cipher.doFinal(Base64.getDecoder().decode(encodedCiphertext))
+        }.getOrNull()
+    }
+
+    private fun getOrCreateHuggingFaceTokenKey(): SecretKey {
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        (keyStore.getKey(HF_TOKEN_KEY_ALIAS, null) as? SecretKey)?.let { return it }
+
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                HF_TOKEN_KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build()
+        )
+        return generator.generateKey()
+    }
 
     private fun loadRegistry(): RegistryState {
         val serialized = prefs.getString(PREF_REGISTRY, null) ?: return RegistryState()

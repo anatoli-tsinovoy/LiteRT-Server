@@ -54,11 +54,13 @@ class LLMForegroundService : Service() {
         private const val ACTION_START_SERVER = "com.litert.server.action.START_SERVER"
         private const val ACTION_STOP_SERVER = "com.litert.server.action.STOP_SERVER"
         private const val ACTION_DELETE_MODEL = "com.litert.server.action.DELETE_MODEL"
+        private const val ACTION_SET_HF_TOKEN = "com.litert.server.action.SET_HF_TOKEN"
 
         private const val EXTRA_MODEL_ID = "model_id"
         private const val EXTRA_NATIVE_MAX_TOKENS = "native_max_tokens"
         private const val EXTRA_DIRECT_URL = "direct_url"
         private const val EXTRA_USE_GPU = "use_gpu"
+        private const val EXTRA_HF_TOKEN = "hf_token"
 
         private val mutableState = MutableStateFlow(ServerSnapshot())
         val state: StateFlow<ServerSnapshot> = mutableState.asStateFlow()
@@ -77,6 +79,12 @@ class LLMForegroundService : Service() {
             dispatch(context, ACTION_SET_NATIVE_MAX_TOKENS) {
                 putExtra(EXTRA_MODEL_ID, modelId)
                 putExtra(EXTRA_NATIVE_MAX_TOKENS, value)
+            }
+        }
+
+        fun setHuggingFaceToken(context: Context, token: String?) {
+            dispatch(context, ACTION_SET_HF_TOKEN) {
+                putExtra(EXTRA_HF_TOKEN, token)
             }
         }
 
@@ -168,6 +176,9 @@ class LLMForegroundService : Service() {
                     command.getIntExtra(EXTRA_NATIVE_MAX_TOKENS, -1)
                 )
             }
+            ACTION_SET_HF_TOKEN -> serviceScope.launch {
+                handleSetHuggingFaceToken(command.getStringExtra(EXTRA_HF_TOKEN))
+            }
             ACTION_ADD_AND_DOWNLOAD -> {
                 if (!isServerOrInitializationBusy() && operationJob?.isActive != true) {
                     startAsForeground(
@@ -239,6 +250,18 @@ class LLMForegroundService : Service() {
             clearCommandError()
         } catch (t: Throwable) {
             setCommandError(errorMessage(t, "Unable to save native context size"))
+        }
+    }
+
+    private suspend fun handleSetHuggingFaceToken(token: String?) {
+        try {
+            withContext(Dispatchers.IO) {
+                manager.setHuggingFaceToken(token)
+            }
+            refreshModelSnapshot()
+            clearCommandError()
+        } catch (t: Throwable) {
+            setCommandError(errorMessage(t, "Unable to save Hugging Face token"))
         }
     }
 
@@ -494,7 +517,8 @@ class LLMForegroundService : Service() {
                     models = models,
                     activeModelId = active.id,
                     apiToken = apiToken,
-                    useGpu = preferences.getBoolean(PREF_USE_GPU, true)
+                    useGpu = preferences.getBoolean(PREF_USE_GPU, true),
+                    hasHuggingFaceToken = manager.hasHuggingFaceToken(),
                 )
             }
         } catch (t: Throwable) {

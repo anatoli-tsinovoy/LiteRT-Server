@@ -54,6 +54,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.litert.server.download.ModelArtifact
 import com.litert.server.service.LLMForegroundService
@@ -112,6 +113,7 @@ private fun ServerScreen() {
     val snapshot by LLMForegroundService.state.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     var directUrl by rememberSaveable { mutableStateOf("") }
+    var huggingFaceToken by remember { mutableStateOf("") }
     var nativeTokens by rememberSaveable { mutableStateOf("") }
     var useGpu by remember { mutableStateOf(snapshot.useGpu) }
     var modelMenuExpanded by remember { mutableStateOf(false) }
@@ -133,6 +135,11 @@ private fun ServerScreen() {
 
     LaunchedEffect(snapshot.useGpu) {
         useGpu = snapshot.useGpu
+    }
+    LaunchedEffect(snapshot.hasHuggingFaceToken) {
+        if (snapshot.hasHuggingFaceToken) {
+            huggingFaceToken = ""
+        }
     }
     LaunchedEffect(activeModel?.id, activeModel?.nativeMaxTokens) {
         nativeTokens = activeModel?.nativeMaxTokens?.toString().orEmpty()
@@ -227,6 +234,48 @@ private fun ServerScreen() {
             }
 
             SectionCard("Download") {
+                OutlinedTextField(
+                    value = huggingFaceToken,
+                    onValueChange = { huggingFaceToken = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = canChangeModel && !snapshot.hasHuggingFaceToken,
+                    singleLine = true,
+                    label = { Text("Hugging Face access token") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    supportingText = {
+                        Text("Required for gated Gemma downloads; stored encrypted on this device.")
+                    }
+                )
+                if (snapshot.hasHuggingFaceToken) {
+                    Text(
+                        "Access token saved",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Button(
+                    onClick = {
+                        if (snapshot.hasHuggingFaceToken) {
+                            LLMForegroundService.setHuggingFaceToken(context, null)
+                        } else {
+                            LLMForegroundService.setHuggingFaceToken(
+                                context,
+                                huggingFaceToken.trim()
+                            )
+                            huggingFaceToken = ""
+                        }
+                    },
+                    enabled = canChangeModel &&
+                        (snapshot.hasHuggingFaceToken || huggingFaceToken.trim().isNotEmpty()),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (snapshot.hasHuggingFaceToken) "Clear saved token"
+                        else "Save access token"
+                    )
+                }
+
                 OutlinedTextField(
                     value = directUrl,
                     onValueChange = { directUrl = it },

@@ -21,5 +21,6 @@ data class ServerSnapshot(
     val backend: String? = null,
     val backendError: String? = null,
     val apiToken: String = "",
+    val hasHuggingFaceToken: Boolean = false,
     val useGpu: Boolean = true
 )
