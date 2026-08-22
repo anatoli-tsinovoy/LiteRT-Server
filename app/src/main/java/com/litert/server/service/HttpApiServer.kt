@@ -1,5 +1,6 @@
 package com.litert.server.service
 
+import com.litert.server.download.ToolPromptProfile
 import com.litert.server.data.OaiChatRequest
 import com.litert.server.data.OaiChatResponse
 import com.litert.server.data.OaiChoice
@@ -57,7 +58,8 @@ import kotlinx.serialization.json.contentOrNull
 class HttpApiServer(
     private val engine: LiteRTEngine,
     private val apiToken: String,
-    private val modelId: String
+    private val modelId: String,
+    private val toolPromptProfile: ToolPromptProfile
 ) {
     private var server: ApplicationEngine? = null
 
@@ -158,7 +160,7 @@ class HttpApiServer(
                                 return@post
                             }
                             val temperature =
-                                if (usesGemmaToolProtocol() && toolsEnabled(request)) {
+                                if (usesStrictToolProtocol() && toolsEnabled(request)) {
                                     0.0
                                 } else {
                                     request.temperature
@@ -182,11 +184,12 @@ class HttpApiServer(
                                 return@post
                             }
 
-                            val prompt = buildPrompt(request)
+                            val strictToolResult = strictToolResultToRelay(request)
+                            val prompt = buildPrompt(request, strictToolResult)
                             if (request.stream) {
-                                streamCompletion(call, request, prompt, temperature)
+                                streamCompletion(call, request, prompt, temperature, strictToolResult)
                             } else {
-                                completeRequest(call, request, prompt, temperature)
+                                completeRequest(call, request, prompt, temperature, strictToolResult)
                             }
                         }
                     }
@@ -211,13 +214,13 @@ class HttpApiServer(
         call: ApplicationCall,
         request: OaiChatRequest,
         prompt: String,
-        temperature: Double
+        temperature: Double,
+        strictToolResult: String?,
     ) {
         val output = StringBuilder()
-        val completedToolResult = completedGemmaToolResult(request)
         val usage =
-            if (completedToolResult != null) {
-                output.append(completedToolResult)
+            if (strictToolResult != null) {
+                output.append(strictToolResult)
                 OaiUsage(promptTokens = 0, completionTokens = 0, totalTokens = 0)
             } else {
                 engine.generate(prompt, temperature) { chunk ->
@@ -225,7 +228,7 @@ class HttpApiServer(
                 }.toOaiUsage()
             }
         val toolCall =
-            if (completedToolResult == null) parseToolCall(output.toString(), request) else null
+            if (strictToolResult == null) parseToolCall(output.toString(), request) else null
         val message =
             if (toolCall != null) {
                 OaiMessage(
@@ -268,6 +271,7 @@ class HttpApiServer(
         request: OaiChatRequest,
         prompt: String,
         temperature: Double,
+        strictToolResult: String?,
     ) {
         val id = requestId()
         val created = System.currentTimeMillis() / 1000
@@ -294,10 +298,9 @@ class HttpApiServer(
 
             try {
                 val output = StringBuilder()
-                val completedToolResult = completedGemmaToolResult(request)
                 val usage =
-                    if (completedToolResult != null) {
-                        output.append(completedToolResult)
+                    if (strictToolResult != null) {
+                        output.append(strictToolResult)
                         OaiUsage(promptTokens = 0, completionTokens = 0, totalTokens = 0)
                     } else {
                         engine.generate(prompt, temperature) { chunk ->
@@ -305,7 +308,7 @@ class HttpApiServer(
                         }.toOaiUsage()
                     }
                 val toolCall =
-                    if (completedToolResult == null) {
+                    if (strictToolResult == null) {
                         parseToolCall(output.toString(), request)
                     } else {
                         null
@@ -391,12 +394,11 @@ class HttpApiServer(
         }
     }
 
-    private fun buildPrompt(request: OaiChatRequest): String {
+    private fun buildPrompt(request: OaiChatRequest, strictToolResult: String?): String {
         val sections = ArrayList<String>(request.messages.size + 3)
         val toolsEnabled = toolsEnabled(request)
-        val gemmaToolProtocol = toolsEnabled && usesGemmaToolProtocol()
-        val hasToolResult =
-            request.messages.any { it.role.equals("tool", ignoreCase = true) }
+        val strictToolProtocol = toolsEnabled && usesStrictToolProtocol()
+        val hasStrictToolResult = strictToolResult != null
         val toolNameById =
             request.messages
                 .flatMap { it.toolCalls.orEmpty() }
@@ -406,7 +408,25 @@ class HttpApiServer(
                 .filter { it.role.equals("tool", ignoreCase = true) }
                 .mapNotNull { it.toolCallId?.let(toolNameById::get) }
                 .distinct()
-        if (toolsEnabled && !(gemmaToolProtocol && hasToolResult)) {
+        val strictToolNamesByMessageIndex = mutableMapOf<Int, String>()
+        if (usesStrictToolProtocol()) {
+            val assistantToolNamesById = mutableMapOf<String, String>()
+            request.messages.forEachIndexed { index, message ->
+                if (message.role.equals("assistant", ignoreCase = true)) {
+                    message.toolCalls.orEmpty().forEach { call ->
+                        assistantToolNamesById[call.id] = call.function.name
+                    }
+                } else if (message.role.equals("tool", ignoreCase = true)) {
+                    val toolCallId = message.toolCallId
+                    if (toolCallId != null) {
+                        assistantToolNamesById[toolCallId]?.let { toolName ->
+                            strictToolNamesByMessageIndex[index] = toolName
+                        }
+                    }
+                }
+            }
+        }
+        if (toolsEnabled && !(strictToolProtocol && hasStrictToolResult)) {
             val definitions =
                 request.tools
                     .orEmpty()
@@ -415,12 +435,21 @@ class HttpApiServer(
             sections += "Available function tools:\n$definitions"
         }
 
-        request.messages.forEach { message ->
+        request.messages.forEachIndexed { messageIndex, message ->
             val role = message.role.trim().ifEmpty { "user" }
             val displayRole =
                 if (role.equals("tool", ignoreCase = true)) {
-                    val toolName = message.toolCallId?.let(toolNameById::get) ?: "unknown"
-                    "tool result for $toolName (completed)"
+                    val toolName =
+                        if (usesStrictToolProtocol()) {
+                            strictToolNamesByMessageIndex[messageIndex]
+                        } else {
+                            message.toolCallId?.let(toolNameById::get)
+                        }
+                    when {
+                        toolName != null -> "tool result for $toolName (completed)"
+                        usesStrictToolProtocol() -> "tool result"
+                        else -> "tool result for unknown (completed)"
+                    }
                 } else {
                     role
                 }
@@ -438,7 +467,7 @@ class HttpApiServer(
         }
 
         when {
-            gemmaToolProtocol && hasToolResult -> {
+            strictToolProtocol && hasStrictToolResult -> {
                 sections +=
                     "A tool has already executed. Your entire response must be only the exact text " +
                         "from the completed tool-result message above, then stop. Copy every character; " +
@@ -448,7 +477,7 @@ class HttpApiServer(
                         "infer file contents or command output. Do not output Markdown or a JSON " +
                         "tool-call object."
             }
-            gemmaToolProtocol -> {
+            strictToolProtocol -> {
                 sections +=
                     "You have executable function tools. If the user asks to read a file, run a " +
                         "command, or obtain information available only through a listed tool, you " +
@@ -495,15 +524,25 @@ class HttpApiServer(
         return sections.joinToString("\n\n")
     }
 
-    private fun usesGemmaToolProtocol(): Boolean =
-        modelId.startsWith("gemma", ignoreCase = true)
+    private fun usesStrictToolProtocol(): Boolean =
+        toolPromptProfile == ToolPromptProfile.STRICT_JSON_RELAY
 
-    private fun completedGemmaToolResult(request: OaiChatRequest): String? {
-        if (!usesGemmaToolProtocol()) return null
-        return request.messages
-            .lastOrNull { it.role.equals("tool", ignoreCase = true) }
-            ?.content
-            ?.toPromptText()
+    private fun strictToolResultToRelay(request: OaiChatRequest): String? {
+        if (!usesStrictToolProtocol()) return null
+        val finalMessage = request.messages.lastOrNull() ?: return null
+        if (!finalMessage.role.equals("tool", ignoreCase = true)) return null
+        val toolCallId = finalMessage.toolCallId ?: return null
+        val finalMessageIndex = request.messages.lastIndex
+        for (messageIndex in 0 until finalMessageIndex) {
+            val message = request.messages[messageIndex]
+            if (
+                message.role.equals("assistant", ignoreCase = true) &&
+                    message.toolCalls.orEmpty().any { it.id == toolCallId }
+            ) {
+                return finalMessage.content.toPromptText()
+            }
+        }
+        return null
     }
 
     private fun compactToolDefinition(tool: OaiTool): String {

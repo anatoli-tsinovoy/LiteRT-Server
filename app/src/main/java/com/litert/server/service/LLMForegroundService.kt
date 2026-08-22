@@ -410,7 +410,13 @@ class LLMForegroundService : Service() {
                 throw initialized.exceptionOrNull()
                     ?: IllegalStateException("LiteRT engine initialization failed")
             }
-            val localServer = HttpApiServer(localEngine, apiToken, model.id)
+            val localServer =
+                HttpApiServer(
+                    engine = localEngine,
+                    apiToken = apiToken,
+                    modelId = model.id,
+                    toolPromptProfile = model.toolPromptProfile
+                )
             apiServer = localServer
             val port = withContext(Dispatchers.IO) { localServer.start() }
             mutableState.update {

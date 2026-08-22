@@ -157,7 +157,13 @@ Expected requested permissions are limited to internet, foreground service, noti
 
 - LiteRT-LM generates text; it does not directly implement OpenAI function
   calling for this server. `HttpApiServer` compacts request tool schemas into
-  model-specific prompts and asks for one call per turn. Qwen uses:
+  model prompts, and the catalog's exact `ToolPromptProfile` selects the
+  prompt/tool behavior. This explicit metadata is authoritative, mirroring
+  GGUF template metadata; behavior is not inferred from an architecture or
+  model ID. The built-in profiles are Qwen `TAGGED_JSON` and Gemma
+  `STRICT_JSON_RELAY`. Custom models default to `TAGGED_JSON`. `.litertlm`
+  files do not expose Jinja or GGUF metadata here, so the server does not
+  extract either to select a profile. Qwen uses:
 
 ```text
 <tool_call>{"name":"tool_name","arguments":{...}}</tool_call>
@@ -171,18 +177,15 @@ Expected requested permissions are limited to internet, foreground service, noti
   escapes; a regex ending at the first `}` breaks nested argument objects.
 - Validate every generated tool name against the request's function tools
   before returning it. Return assistant calls through `message.tool_calls` with
-  `finish_reason: "tool_calls"`; the next `role: "tool"` message must retain the
-  matching `tool_call_id`.
+  `finish_reason: "tool_calls"`; the next `role: "tool"` message must retain
+  the matching `tool_call_id`.
 - Prompt history labels completed tool results with their function name. This
   matters for the 0.6B model: without an explicit completed-call marker it can
   repeat the first function instead of proceeding to the next requested tool.
-- Tool-enabled requests default to temperature 0. Gemma tool requests force
-  temperature 0 even when the client supplies another value; Qwen retains the
-  client override.
-- Gemma post-tool turns return the latest completed tool-result text verbatim
-  without another inference pass. This prevents repeated calls and corruption
-  of exact file or command output; never parse that relayed result as a new
-  model-generated tool call.
+- Tool-enabled requests default to temperature 0. `STRICT_JSON_RELAY` requests
+  force temperature 0 even when the client supplies another value;
+  `TAGGED_JSON` retains the client override.
+- `STRICT_JSON_RELAY` relays the final/current tool-result text verbatim only when the request's final message is a `role: "tool"` result with a non-null `tool_call_id` (`toolCallId` internally) matching an earlier assistant tool call ID in the same request. Tool results from historical turns are never replayed on later turns. Otherwise it performs normal generation and never labels the result completed by a known function name. This prevents repeated calls and corruption of exact file or command output; never parse that relayed result as a new model-generated tool call.
 - Streaming completions are buffered before emitting content or a tool call.
   A tool call is emitted as one OpenAI-compatible SSE delta followed by
   `finish_reason: "tool_calls"`, usage, and `[DONE]`.

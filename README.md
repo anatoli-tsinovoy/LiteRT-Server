@@ -127,9 +127,20 @@ omp --model litert-server/qwen3-0.6b
 - Engine start is explicit and idempotent across Activity recreation.
 - GPU initialization falls back to CPU when unavailable and exposes the native
   fallback reason in the app and `/health`.
-- OpenAI function tools are returned as `tool_calls`. Qwen uses the tagged tool
-  protocol; Gemma uses a stricter bare-JSON protocol and relays completed tool
-  results verbatim to avoid corrupting command or file output.
+- Prompt/tool behavior is explicit catalog metadata named `ToolPromptProfile`,
+  mirroring GGUF's template-metadata authority rather than inferring from an
+  architecture or model ID. The built-in Qwen profile is `TAGGED_JSON`; Gemma
+  is `STRICT_JSON_RELAY`; custom models default to `TAGGED_JSON`. `.litertlm`
+  does not expose Jinja or GGUF metadata here, so the server performs no such
+  metadata extraction.
+- `TAGGED_JSON` uses the tagged tool protocol. `STRICT_JSON_RELAY` uses bare
+  JSON examples, forces tool temperature to 0, and relays the final/current
+  tool-result text verbatim only when the request's final message is a
+  `role: "tool"` result with a non-null `tool_call_id` matching an earlier
+  assistant tool call ID in the same request. Tool results from historical turns
+  are never replayed on later turns. Without that match, it performs normal
+  generation and never labels the result completed by a known function name.
+- OpenAI function tools are returned as `tool_calls`.
 - Server inference is serialized to protect the native engine.
 - Download and inference work run off the Android main thread.
 - Android backup is disabled; the API never binds beyond localhost.

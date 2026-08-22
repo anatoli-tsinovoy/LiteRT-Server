@@ -54,6 +54,12 @@ data class DownloadProgress(
 )
 
 @Serializable
+enum class ToolPromptProfile {
+    TAGGED_JSON,
+    STRICT_JSON_RELAY
+}
+
+@Serializable
 data class ModelDescriptor(
     val id: String,
     val displayName: String,
@@ -63,7 +69,8 @@ data class ModelDescriptor(
     val expectedBytes: Long,
     val contextWindowTokens: Int,
     val nativeMaxTokens: Int,
-    val isCustom: Boolean
+    val isCustom: Boolean,
+    val toolPromptProfile: ToolPromptProfile = ToolPromptProfile.TAGGED_JSON
 )
 
 data class ModelArtifact(
@@ -85,18 +92,20 @@ object ModelCatalog {
             expectedBytes = 497_664_000L,
             contextWindowTokens = 2_048,
             nativeMaxTokens = 2_048,
-            isCustom = false
+            isCustom = false,
+            toolPromptProfile = ToolPromptProfile.TAGGED_JSON
         ),
         ModelDescriptor(
             id = "gemma-3n-e4b-it",
             displayName = "Gemma 3n E4B",
             description = "4B effective · INT4 · GPU-tested on Snapdragon 8 Gen 3 · gated",
-            downloadUrl = "https://huggingface.co/google/gemma-3n-E4B-it-litert-lm/resolve/297ed75955702dec3503e00c2c2ecbbf475300bc/gemma-3n-E4B-it-int4.litertlm",
+            downloadUrl = "https://huggingface.co/google/gemma-3n-E4B-it-litert-lm/resolve/297ed75955702dec3503e00c2c2ecbbf475300bc/gemma-3n-e4b-it-int4.litertlm",
             filename = "gemma-3n-E4B-it-int4.litertlm",
             expectedBytes = 4_919_541_760L,
             contextWindowTokens = 32_768,
             nativeMaxTokens = 4_096,
-            isCustom = false
+            isCustom = false,
+            toolPromptProfile = ToolPromptProfile.STRICT_JSON_RELAY
         )
     )
 
