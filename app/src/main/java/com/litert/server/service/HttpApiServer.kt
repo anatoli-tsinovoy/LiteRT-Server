@@ -1,46 +1,38 @@
 package com.litert.server.service
 
-import com.litert.server.DiagnosticsLogger
-import com.litert.server.data.ChatRequest
-import com.litert.server.data.ChatResponse
-import com.litert.server.data.ErrorResponse
-import com.litert.server.data.HealthResponse
 import com.litert.server.data.OaiChatRequest
-import com.litert.server.data.OaiRequestMessage
 import com.litert.server.data.OaiChatResponse
-import com.litert.server.data.OaiFunctionCall
 import com.litert.server.data.OaiChoice
 import com.litert.server.data.OaiDelta
+import com.litert.server.data.OaiError
+import com.litert.server.data.OaiErrorResponse
+import com.litert.server.data.OaiFunctionCall
+import com.litert.server.data.OaiHealthResponse
 import com.litert.server.data.OaiMessage
 import com.litert.server.data.OaiModelEntry
 import com.litert.server.data.OaiModelsResponse
 import com.litert.server.data.OaiStreamChunk
-import com.litert.server.data.OaiStreamChoice
 import com.litert.server.data.OaiStreamFunctionCall
 import com.litert.server.data.OaiStreamToolCall
-import com.litert.server.data.OaiTool
 import com.litert.server.data.OaiToolCall
+import com.litert.server.data.OaiTool
+import com.litert.server.data.OaiStreamChoice
 import com.litert.server.data.OaiUsage
-import com.litert.server.data.RequestLogEntry
-import com.litert.server.data.VisionRequest
 import com.litert.server.engine.GenerationUsage
 import com.litert.server.engine.LiteRTEngine
-import io.ktor.http.HttpHeaders
-import io.ktor.server.application.ApplicationCall
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
-import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.ContentTransformationException
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.server.plugins.cors.routing.CORS
+import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.plugins.statuspages.StatusPages
-import io.ktor.server.request.authorization
-import io.ktor.server.request.httpMethod
-import io.ktor.server.request.uri
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondTextWriter
@@ -48,574 +40,588 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
-import kotlinx.coroutines.flow.toList
-import kotlinx.serialization.decodeFromString
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.UUID
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
-
 class HttpApiServer(
     private val engine: LiteRTEngine,
     private val apiToken: String,
-    private val modelId: String,
-    private val onRequest: (RequestLogEntry) -> Unit
+    private val modelId: String
 ) {
-    private data class ParsedToolCalls(
-        val content: String,
-        val toolCalls: List<OaiToolCall>
-    )
-
     private var server: ApplicationEngine? = null
-    var port: Int = 8080
+
+    var port: Int = 0
         private set
 
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private val GEMMA_TOOL_CALL_REGEX = Regex("<\\|tool_call>(.*?)<tool_call\\|>", RegexOption.DOT_MATCHES_ALL)
-    private val GEMMA_STRING_DELIMITER = "<|\"|>"
-    private val supportedReasoningEfforts = setOf("minimal", "low", "medium", "high")
-
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        explicitNulls = false
+    }
 
     fun start(): Int {
-        for (tryPort in 8080..8082) {
-            try {
-                DiagnosticsLogger.event("HttpApiServer", "Starting server on 127.0.0.1:$tryPort model=$modelId")
-                server = embeddedServer(CIO, host = "127.0.0.1", port = tryPort) {
-                    install(ContentNegotiation) {
-                        json(json)
-                    }
-                    install(CORS) {
-                        anyHost()
-                        allowHeader(HttpHeaders.Authorization)
-                        allowHeader(HttpHeaders.ContentType)
-                    }
-                    install(StatusPages) {
-                        exception<Throwable> { call, cause ->
-                            DiagnosticsLogger.error(
-                                "HttpApiServer",
-                                "Unhandled ${call.request.httpMethod.value} ${call.request.uri}",
-                                cause
-                            )
-                            call.respond(
-                                HttpStatusCode.InternalServerError,
-                                ErrorResponse(error = cause.message ?: "Unknown error", code = 500)
-                            )
-                        }
-                    }
+        server?.let { return port }
 
-                    routing {
-
-                        // ── health ──────────────────────────────────────────
-                        get("/health") {
-                            call.respond(
-                                HealthResponse(
-                                    status = "ok",
-                                    model = modelId,
-                                    gpu = engine.getBackend() == "GPU",
-                                    ready = engine.isReady
-                                )
+        var lastFailure: Throwable? = null
+        for (candidatePort in 8080..8082) {
+            val candidate = embeddedServer(CIO, host = "127.0.0.1", port = candidatePort) {
+                install(ContentNegotiation) {
+                    json(json)
+                }
+                install(StatusPages) {
+                    exception<Throwable> { call, cause ->
+                        if (cause is CancellationException) throw cause
+                        if (cause is ContentTransformationException || cause is SerializationException) {
+                            call.respondError(
+                                status = HttpStatusCode.BadRequest,
+                                message = "Invalid JSON request body"
+                            )
+                        } else {
+                            call.respondError(
+                                status = HttpStatusCode.InternalServerError,
+                                message = "Internal server error",
+                                type = "server_error",
+                                code = "internal_error"
                             )
                         }
+                    }
+                }
 
-                        // ── OpenAI-compatible v1 routes ──────────────────────
-                        route("/v1") {
+                routing {
+                    get("/health") {
+                        call.respond(
+                            OaiHealthResponse(
+                                status = "ok",
+                                model = modelId,
+                                ready = engine.isReady,
+                                gpu = engine.backend.equals("GPU", ignoreCase = true),
+                                backendError = engine.gpuFallbackReason
+                            )
+                        )
+                    }
 
-                            get("/models") {
-                                if (!call.requireApiToken()) return@get
-                                call.respond(
-                                    OaiModelsResponse(
-                                        data = listOf(
-                                            OaiModelEntry(id = modelId)
+                    route("/v1") {
+                        get("/models") {
+                            if (!call.requireApiToken()) return@get
+                            call.respond(
+                                OaiModelsResponse(
+                                    data = listOf(
+                                        OaiModelEntry(
+                                            id = modelId,
+                                            created = System.currentTimeMillis() / 1000
                                         )
                                     )
                                 )
-                            }
-
-                            post("/chat/completions") {
-                                if (!call.requireApiToken()) return@post
-                                if (!engine.isReady) {
-                                    call.respond(
-                                        HttpStatusCode.ServiceUnavailable,
-                                        ErrorResponse("Engine not ready", 503)
-                                    )
-                                    return@post
-                                }
-
-                                val req = call.receive<OaiChatRequest>()
-                                val isToolResultTurn = req.isToolResultTurn()
-                                val start = System.currentTimeMillis()
-
-                                val prompt = buildPrompt(req)
-                                DiagnosticsLogger.event(
-                                    "HttpApiServer",
-                                    "chat/completions stream=${req.stream} messages=${req.messages.size} toolResultTurn=$isToolResultTurn promptChars=${prompt.length}"
-                                )
-
-                                if (req.stream) {
-                                    val reqId = "chatcmpl-${System.currentTimeMillis()}"
-                                    var streamStatusCode = 200
-                                    call.respondTextWriter(contentType = ContentType.Text.EventStream) {
-                                        var completed = false
-                                        var streamFinishReason = "stop"
-                                        try {
-                                            // First chunk carries the role.
-                                            val firstChunk = OaiStreamChunk(
-                                                id = reqId,
-                                                created = System.currentTimeMillis() / 1000,
-                                                model = modelId,
-                                                choices = listOf(
-                                                    OaiStreamChoice(
-                                                        index = 0,
-                                                        delta = OaiDelta(role = "assistant", content = "")
-                                                    )
-                                                )
-                                            )
-                                            write("data: ${json.encodeToString(firstChunk)}\n\n")
-                                            flush()
-
-                                            val content = engine.generateStatelessText(prompt).toList().joinToString("")
-                                            val parsedToolCalls = postProcessToolResultTurn(req, parseGemmaToolCalls(content))
-                                            if (parsedToolCalls.toolCalls.isNotEmpty()) {
-                                                streamFinishReason = "tool_calls"
-                                                val chunk = OaiStreamChunk(
-                                                    id = reqId,
-                                                    created = System.currentTimeMillis() / 1000,
-                                                    model = modelId,
-                                                    choices = listOf(
-                                                        OaiStreamChoice(
-                                                            index = 0,
-                                                            delta = OaiDelta(
-                                                                toolCalls = parsedToolCalls.toolCalls.mapIndexed { index, toolCall ->
-                                                                    OaiStreamToolCall(
-                                                                        index = index,
-                                                                        id = toolCall.id,
-                                                                        type = toolCall.type,
-                                                                        function = OaiStreamFunctionCall(
-                                                                            name = toolCall.function.name,
-                                                                            arguments = toolCall.function.arguments
-                                                                        )
-                                                                    )
-                                                                }
-                                                            )
-                                                        )
-                                                    )
-                                                )
-                                                write("data: ${json.encodeToString(chunk)}\n\n")
-                                                flush()
-                                            } else if (parsedToolCalls.content.isNotEmpty()) {
-                                                val chunk = OaiStreamChunk(
-                                                    id = reqId,
-                                                    created = System.currentTimeMillis() / 1000,
-                                                    model = modelId,
-                                                    choices = listOf(
-                                                        OaiStreamChoice(
-                                                            index = 0,
-                                                            delta = OaiDelta(content = parsedToolCalls.content)
-                                                        )
-                                                    )
-                                                )
-                                                write("data: ${json.encodeToString(chunk)}\n\n")
-                                                flush()
-                                            }
-                                            completed = true
-                                        } catch (t: Throwable) {
-                                            streamStatusCode = 500
-                                            DiagnosticsLogger.error("HttpApiServer", "chat/completions stream generation failed", t)
-                                            val safeMessage = (t.message ?: t.javaClass.name)
-                                                .replace('\n', ' ')
-                                                .replace('\r', ' ')
-                                            val errorChunk = OaiStreamChunk(
-                                                id = reqId,
-                                                created = System.currentTimeMillis() / 1000,
-                                                model = modelId,
-                                                choices = listOf(
-                                                    OaiStreamChoice(
-                                                        index = 0,
-                                                        delta = OaiDelta(content = "\n[LiteRT generation failed: $safeMessage]")
-                                                    )
-                                                )
-                                            )
-                                            write("data: ${json.encodeToString(errorChunk)}\n\n")
-                                        } finally {
-                                            val usage = if (completed) engine.getLastGenerationUsage().toOaiUsage() else null
-                                            val finishReason = if (completed) streamFinishReason else "stop"
-                                            val stopChunk = OaiStreamChunk(
-                                                id = reqId,
-                                                created = System.currentTimeMillis() / 1000,
-                                                model = modelId,
-                                                choices = listOf(
-                                                    OaiStreamChoice(
-                                                        index = 0,
-                                                        delta = OaiDelta(),
-                                                        finishReason = finishReason
-                                                    )
-                                                )
-                                            )
-                                            write("data: ${json.encodeToString(stopChunk)}\n\n")
-                                            if (usage != null) {
-                                                val usageChunk = OaiStreamChunk(
-                                                    id = reqId,
-                                                    created = System.currentTimeMillis() / 1000,
-                                                    model = modelId,
-                                                    choices = emptyList(),
-                                                    usage = usage
-                                                )
-                                                write("data: ${json.encodeToString(usageChunk)}\n\n")
-                                            }
-                                            write("data: [DONE]\n\n")
-                                            flush()
-                                            DiagnosticsLogger.event(
-                                                "HttpApiServer",
-                                                "chat/completions stream closed completed=$completed status=$streamStatusCode"
-                                            )
-                                        }
-                                    }
-                                    val ms = System.currentTimeMillis() - start
-                                    onRequest(RequestLogEntry(endpoint = "/v1/chat/completions", responseTimeMs = ms, statusCode = streamStatusCode))
-                                } else {
-                                    val rawContent = engine.generateStatelessText(prompt).toList().joinToString("")
-                                    val parsedToolCalls = postProcessToolResultTurn(req, parseGemmaToolCalls(rawContent))
-                                    val ms = System.currentTimeMillis() - start
-                                    onRequest(RequestLogEntry(endpoint = "/v1/chat/completions", responseTimeMs = ms, statusCode = 200))
-                                    call.respond(
-                                        OaiChatResponse(
-                                            id = "chatcmpl-${System.currentTimeMillis()}",
-                                            created = System.currentTimeMillis() / 1000,
-                                            model = modelId,
-                                            choices = listOf(
-                                                OaiChoice(
-                                                    index = 0,
-                                                    message = OaiMessage(
-                                                        role = "assistant",
-                                                        content = parsedToolCalls.content,
-                                                        toolCalls = parsedToolCalls.toolCalls.takeIf { it.isNotEmpty() }
-                                                    ),
-                                                    finishReason = if (parsedToolCalls.toolCalls.isNotEmpty()) "tool_calls" else "stop"
-                                                )
-                                            ),
-                                            usage = engine.getLastGenerationUsage().toOaiUsage()
-                                        )
-                                    )
-                                }
-                            }
+                            )
                         }
 
-                        // ── Legacy routes (kept for backward compat) ─────────
-                        post("/chat") {
+                        post("/chat/completions") {
                             if (!call.requireApiToken()) return@post
-                            val start = System.currentTimeMillis()
-                            val req = call.receive<ChatRequest>()
-                            if (!engine.isReady) {
-                                call.respond(
-                                    HttpStatusCode.ServiceUnavailable,
-                                    ErrorResponse("Engine not ready", 503)
+
+                            val request = try {
+                                call.receive<OaiChatRequest>()
+                            } catch (cause: Throwable) {
+                                if (cause is CancellationException) throw cause
+                                call.respondError(
+                                    status = HttpStatusCode.BadRequest,
+                                    message = "Invalid JSON request body"
                                 )
                                 return@post
                             }
-                            val tokens = engine.generateStatelessText(req.message).toList()
-                            val response = tokens.joinToString("")
-                            val ms = System.currentTimeMillis() - start
-                            onRequest(RequestLogEntry(endpoint = "/chat", responseTimeMs = ms, statusCode = 200))
-                            call.respond(
-                                ChatResponse(response = response, tokens = tokens.size, ms = ms)
-                            )
-                        }
 
-                        post("/vision") {
-                            if (!call.requireApiToken()) return@post
-                            call.respond(
-                                HttpStatusCode.NotImplemented,
-                                ErrorResponse(
-                                    error = "Vision is disabled for the current text-only LiteRT-LM engine configuration",
-                                    code = 501
+                            if (request.model != modelId) {
+                                call.respondError(
+                                    status = HttpStatusCode.NotFound,
+                                    message = "The model '${request.model}' does not exist",
+                                    param = "model",
+                                    code = "model_not_found"
                                 )
-                            )
-                        }
+                                return@post
+                            }
+                            if (request.messages.isEmpty()) {
+                                call.respondError(
+                                    status = HttpStatusCode.BadRequest,
+                                    message = "At least one message is required",
+                                    param = "messages"
+                                )
+                                return@post
+                            }
+                            val temperature =
+                                request.temperature
+                                    ?: if (toolsEnabled(request)) 0.0 else DEFAULT_TEMPERATURE
+                            if (!temperature.isFinite() || temperature < 0.0 || temperature > 2.0) {
+                                call.respondError(
+                                    status = HttpStatusCode.BadRequest,
+                                    message = "temperature must be between 0 and 2",
+                                    param = "temperature"
+                                )
+                                return@post
+                            }
+                            if (!engine.isReady) {
+                                call.respondError(
+                                    status = HttpStatusCode.ServiceUnavailable,
+                                    message = "The model engine is not ready",
+                                    type = "server_error",
+                                    code = "engine_not_ready"
+                                )
+                                return@post
+                            }
 
-                        post("/reset") {
-                            if (!call.requireApiToken()) return@post
-                            engine.clearHistory()
-                            onRequest(RequestLogEntry(endpoint = "/reset", responseTimeMs = 0, statusCode = 200))
-                            call.respond(mapOf("status" to "conversation cleared"))
+                            val prompt = buildPrompt(request)
+                            if (request.stream) {
+                                streamCompletion(call, request, prompt, temperature)
+                            } else {
+                                completeRequest(call, request, prompt, temperature)
+                            }
                         }
                     }
                 }
-                server!!.start(wait = false)
-                port = tryPort
-                return tryPort
-            } catch (e: Exception) {
-                if (tryPort == 8082) throw e
+            }
+
+            try {
+                candidate.start(wait = false)
+                server = candidate
+                port = candidatePort
+                return candidatePort
+            } catch (failure: Throwable) {
+                lastFailure = failure
+                runCatching { candidate.stop(0, 0) }
             }
         }
-        throw IllegalStateException("Could not bind to any port (8080-8082)")
+
+        throw IllegalStateException("Could not bind to a localhost port", lastFailure)
     }
 
-    private fun buildPrompt(req: OaiChatRequest): String {
-        val reasoningInstructions = buildReasoningInstructions(req.reasoningEffort)
-        val isToolResultTurn = req.isToolResultTurn()
-        val toolInstructions = if (isToolResultTurn) {
-            ""
-        } else {
-            req.tools
-                ?.filter { it.type == "function" }
-                ?.takeIf { it.isNotEmpty() }
-                ?.let(::buildToolInstructions)
-                .orEmpty()
+    private suspend fun completeRequest(
+        call: ApplicationCall,
+        request: OaiChatRequest,
+        prompt: String,
+        temperature: Double
+    ) {
+        val output = StringBuilder()
+        val usage = engine.generate(prompt, temperature) { chunk ->
+            output.append(chunk)
         }
-        val history = req.messages.mapNotNull { formatPromptMessage(it) }.joinToString("\n")
-        val postToolInstructions = if (isToolResultTurn) buildPostToolInstructions() else ""
-        val chat = if (history.isEmpty()) {
-            "assistant:"
-        } else {
-            listOf(history, postToolInstructions, "assistant:").filter { it.isNotBlank() }.joinToString("\n")
-        }
-        return listOf(reasoningInstructions, toolInstructions, chat)
-            .filter { it.isNotBlank() }
-            .joinToString("\n\n")
-    }
-
-    private fun buildReasoningInstructions(rawEffort: String?): String {
-        val effort = rawEffort?.trim()?.lowercase().orEmpty()
-        if (effort.isEmpty() || effort == "off" || effort !in supportedReasoningEfforts) return ""
-
-        val description = when (effort) {
-            "minimal" -> "Use only brief internal reasoning."
-            "low" -> "Use light internal reasoning."
-            "medium" -> "Use balanced internal reasoning."
-            else -> "Use thorough internal reasoning before answering."
-        }
-        return "Reasoning effort: $effort. $description Keep hidden reasoning private; output only the final answer or a required tool call."
-    }
-
-    private fun formatPromptMessage(message: OaiRequestMessage): String? {
-        val content = message.content.toPromptText().trim()
-        val toolCalls = message.toolCalls.orEmpty()
-        return when (message.role.lowercase()) {
-            "assistant" -> when {
-                toolCalls.isNotEmpty() && content.isNotEmpty() ->
-                    "assistant: $content\nassistant: ${toolCalls.joinToString("") { it.toGemmaToolCallSyntax() }}"
-                toolCalls.isNotEmpty() ->
-                    "assistant: ${toolCalls.joinToString("") { it.toGemmaToolCallSyntax() }}"
-                content.isNotEmpty() -> "assistant: $content"
-                else -> "assistant:"
+        val toolCall = parseToolCall(output.toString(), request)
+        val message =
+            if (toolCall != null) {
+                OaiMessage(
+                    role = "assistant",
+                    toolCalls =
+                        listOf(
+                            OaiToolCall(
+                                id = toolCallId(),
+                                function =
+                                    OaiFunctionCall(
+                                        name = toolCall.name,
+                                        arguments = toolCall.arguments,
+                                    ),
+                            )
+                        ),
+                )
+            } else {
+                OaiMessage(role = "assistant", content = output.toString())
             }
-            "tool" -> {
-                val label = message.name ?: message.toolCallId ?: "result"
-                if (content.isNotEmpty()) {
-                    "tool_result($label): $content\nsystem: The tool_result above is already available. Answer the user from it now."
+        call.respond(
+            OaiChatResponse(
+                id = requestId(),
+                created = System.currentTimeMillis() / 1000,
+                model = modelId,
+                choices =
+                    listOf(
+                        OaiChoice(
+                            index = 0,
+                            message = message,
+                            finishReason = if (toolCall != null) "tool_calls" else "stop",
+                        )
+                    ),
+                usage = usage.toOaiUsage(),
+            )
+        )
+    }
+
+    private suspend fun streamCompletion(
+        call: ApplicationCall,
+        request: OaiChatRequest,
+        prompt: String,
+        temperature: Double,
+    ) {
+        val id = requestId()
+        val created = System.currentTimeMillis() / 1000
+        call.respondTextWriter(contentType = ContentType.Text.EventStream) {
+            suspend fun writeChunk(chunk: OaiStreamChunk) {
+                write("data: ${json.encodeToString(chunk)}\n\n")
+                flush()
+            }
+
+            writeChunk(
+                OaiStreamChunk(
+                    id = id,
+                    created = created,
+                    model = modelId,
+                    choices =
+                        listOf(
+                            OaiStreamChoice(
+                                index = 0,
+                                delta = OaiDelta(role = "assistant"),
+                            )
+                        ),
+                )
+            )
+
+            try {
+                val output = StringBuilder()
+                val usage =
+                    engine.generate(prompt, temperature) { chunk ->
+                        output.append(chunk)
+                    }.toOaiUsage()
+                val toolCall = parseToolCall(output.toString(), request)
+                val delta =
+                    if (toolCall != null) {
+                        OaiDelta(
+                            toolCalls =
+                                listOf(
+                                    OaiStreamToolCall(
+                                        index = 0,
+                                        id = toolCallId(),
+                                        type = "function",
+                                        function =
+                                            OaiStreamFunctionCall(
+                                                name = toolCall.name,
+                                                arguments = toolCall.arguments,
+                                            ),
+                                    )
+                                )
+                        )
+                    } else {
+                        OaiDelta(content = output.toString())
+                    }
+                writeChunk(
+                    OaiStreamChunk(
+                        id = id,
+                        created = created,
+                        model = modelId,
+                        choices =
+                            listOf(
+                                OaiStreamChoice(
+                                    index = 0,
+                                    delta = delta,
+                                )
+                            ),
+                    )
+                )
+                writeChunk(
+                    OaiStreamChunk(
+                        id = id,
+                        created = created,
+                        model = modelId,
+                        choices =
+                            listOf(
+                                OaiStreamChoice(
+                                    index = 0,
+                                    delta = OaiDelta(),
+                                    finishReason = if (toolCall != null) "tool_calls" else "stop",
+                                )
+                            ),
+                    )
+                )
+                writeChunk(
+                    OaiStreamChunk(
+                        id = id,
+                        created = created,
+                        model = modelId,
+                        choices = emptyList(),
+                        usage = usage,
+                    )
+                )
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                val error =
+                    OaiErrorResponse(
+                        error =
+                            OaiError(
+                                message =
+                                    cause.message?.takeIf { it.isNotBlank() }
+                                        ?: "Generation failed",
+                                type = "server_error",
+                                code = "generation_error",
+                            )
+                    )
+                write("data: ${json.encodeToString(error)}\n\n")
+                flush()
+            }
+
+            write("data: [DONE]\n\n")
+            flush()
+        }
+    }
+
+    private fun buildPrompt(request: OaiChatRequest): String {
+        val sections = ArrayList<String>(request.messages.size + 3)
+        val toolNameById =
+            request.messages
+                .flatMap { it.toolCalls.orEmpty() }
+                .associate { it.id to it.function.name }
+        val completedToolNames =
+            request.messages
+                .filter { it.role.equals("tool", ignoreCase = true) }
+                .mapNotNull { it.toolCallId?.let(toolNameById::get) }
+                .distinct()
+        if (toolsEnabled(request)) {
+            val definitions =
+                request.tools
+                    .orEmpty()
+                    .filter { it.type.equals("function", ignoreCase = true) }
+                    .joinToString("\n", transform = ::compactToolDefinition)
+            sections += "Available function tools:\n$definitions"
+        }
+
+        request.messages.forEach { message ->
+            val role = message.role.trim().ifEmpty { "user" }
+            val displayRole =
+                if (role.equals("tool", ignoreCase = true)) {
+                    val toolName = message.toolCallId?.let(toolNameById::get) ?: "unknown"
+                    "tool result for $toolName (completed)"
                 } else {
-                    "tool_result($label):\nsystem: The tool returned no content. Answer the user with that fact now."
+                    role
+                }
+            val content = message.content.toPromptText().trim()
+            val toolCalls =
+                message.toolCalls.orEmpty().joinToString("\n") { call ->
+                    "${call.function.name}(${call.function.arguments})"
+                }
+            val body =
+                listOf(content, toolCalls.takeIf { it.isNotBlank() })
+                    .filterNotNull()
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n")
+            sections += if (body.isNotBlank()) "$displayRole: $body" else "$displayRole:"
+        }
+
+        if (completedToolNames.isNotEmpty()) {
+            sections +=
+                "Completed tools: ${completedToolNames.joinToString(", ")}. " +
+                    "Continue with the next requested action; do not repeat a completed tool " +
+                    "unless the user explicitly requested repetition."
+        }
+
+        if (toolsEnabled(request)) {
+            sections +=
+                "To call a tool, output only " +
+                    "<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>. " +
+                    "Call exactly one tool at a time. Do not use Markdown around a tool call. " +
+                    "When no tool is needed, answer normally."
+        }
+        sections += "assistant:"
+        return sections.joinToString("\n\n")
+    }
+
+    private fun compactToolDefinition(tool: OaiTool): String {
+        val schema = tool.function.parameters as? JsonObject
+        val properties = schema?.get("properties") as? JsonObject
+        val required =
+            (schema?.get("required") as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                ?.toSet()
+                .orEmpty()
+        val parameters =
+            properties
+                ?.entries
+                ?.joinToString(", ") { (name, definition) ->
+                    val type =
+                        ((definition as? JsonObject)?.get("type") as? JsonPrimitive)
+                            ?.contentOrNull
+                            ?: "value"
+                    "$name:$type${if (name in required) " required" else ""}"
+                }
+                .orEmpty()
+        val description =
+            tool.function.description
+                ?.replace(Regex("\\s+"), " ")
+                ?.trim()
+                ?.take(120)
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { " — $it" }
+                .orEmpty()
+        return "- ${tool.function.name}($parameters)$description"
+    }
+
+    private fun toolsEnabled(request: OaiChatRequest): Boolean {
+        val choice = request.toolChoice as? JsonPrimitive
+        return request.tools.orEmpty().any { it.type.equals("function", ignoreCase = true) } &&
+            !choice?.contentOrNull.equals("none", ignoreCase = true)
+    }
+
+    private fun parseToolCall(output: String, request: OaiChatRequest): ParsedToolCall? {
+        if (!toolsEnabled(request)) return null
+        val payload = extractToolCallPayload(output) ?: return null
+        val parsed =
+            runCatching { json.parseToJsonElement(payload) as? JsonObject }.getOrNull()
+                ?: return null
+        val name = (parsed["name"] as? JsonPrimitive)?.contentOrNull ?: return null
+        val allowed =
+            request.tools
+                .orEmpty()
+                .any {
+                    it.type.equals("function", ignoreCase = true) && it.function.name == name
+                }
+        if (!allowed) return null
+        val arguments = parsed["arguments"] ?: JsonObject(emptyMap())
+        val encodedArguments =
+            if (arguments is JsonPrimitive && arguments.isString) {
+                arguments.content
+            } else {
+                arguments.toString()
+            }
+        return ParsedToolCall(name = name, arguments = encodedArguments)
+    }
+    private fun extractToolCallPayload(output: String): String? {
+        val markerIndex = output.indexOf(TOOL_CALL_MARKER, ignoreCase = true)
+        var objectStart =
+            output.indexOf(
+                '{',
+                startIndex =
+                    if (markerIndex >= 0) markerIndex + TOOL_CALL_MARKER.length else 0,
+            )
+        while (objectStart >= 0) {
+            val candidate = balancedJsonObject(output, objectStart)
+            if (candidate != null) {
+                val parsed =
+                    runCatching { json.parseToJsonElement(candidate) as? JsonObject }.getOrNull()
+                if (parsed?.containsKey("name") == true &&
+                    parsed.containsKey("arguments")
+                ) {
+                    return candidate
                 }
             }
-            "developer" -> content.takeIf { it.isNotEmpty() }?.let { "system: $it" }
-            else -> content.takeIf { it.isNotEmpty() }?.let { "${message.role}: $it" }
+            objectStart = output.indexOf('{', startIndex = objectStart + 1)
         }
-    }
-    private fun OaiChatRequest.isToolResultTurn(): Boolean =
-        messages.lastOrNull()?.role?.equals("tool", ignoreCase = true) == true
-
-    private fun postProcessToolResultTurn(
-        req: OaiChatRequest,
-        parsed: ParsedToolCalls
-    ): ParsedToolCalls {
-        if (!req.isToolResultTurn() || parsed.toolCalls.isEmpty()) return parsed
-
-        val fallback = parsed.content.takeIf { it.isNotBlank() }
-            ?: req.messages.lastOrNull()?.content.toPromptText().trim().takeIf { it.isNotBlank() }
-            ?.let { "Tool result: $it" }
-            ?: "The tool returned no content."
-        DiagnosticsLogger.event("HttpApiServer", "suppressed repeated tool call after tool_result count=${parsed.toolCalls.size}")
-        return ParsedToolCalls(content = fallback, toolCalls = emptyList())
+        return null
     }
 
-
-    private fun buildPostToolInstructions(): String =
-        "The latest message is a tool_result from a tool you already requested. " +
-            "Do not emit <|tool_call> again on this turn. " +
-            "Use the tool_result to answer the user's original request in natural language."
-
-    private fun buildToolInstructions(tools: List<OaiTool>): String {
-        val definitions = tools.joinToString("\n") { tool ->
-            val function = tool.function
-            "- ${function.name}: ${function.description.orEmpty()}\n  parameters: ${function.parameters ?: JsonObject(emptyMap())}"
+    private fun balancedJsonObject(output: String, objectStart: Int): String? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in objectStart until output.length) {
+            val character = output[index]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    character == '\\' -> escaped = true
+                    character == '"' -> inString = false
+                }
+                continue
+            }
+            when (character) {
+                '"' -> inString = true
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) return output.substring(objectStart, index + 1)
+                }
+            }
         }
-        return "Available tools:\n$definitions\n" +
-            "If a tool is required, respond only with Gemma tool-call syntax: " +
-            "<|tool_call>call:function_name{argument:<|\"|>value<|\"|>}<tool_call|>. " +
-            "Do not wrap tool calls in markdown or prose. " +
-            "After a tool_result message, use that result to answer the user; do not repeat the same tool call with the same arguments."
+        return null
     }
 
-    private fun OaiToolCall.toGemmaToolCallSyntax(): String {
-        val arguments = function.arguments.toGemmaArguments()
-        return "<|tool_call>call:${function.name}{$arguments}<tool_call|>"
-    }
-
-    private fun String.toGemmaArguments(): String {
-        val parsed = runCatching { json.decodeFromString<JsonElement>(this) }.getOrNull()
-        if (parsed !is JsonObject) {
-            return takeIf { it.isNotBlank() && it != "{}" }
-                ?.let { "arguments:${JsonPrimitive(it).toGemmaToolValue()}" }
-                .orEmpty()
-        }
-        return parsed.entries.joinToString(",") { (key, value) ->
-            "$key:${value.toGemmaToolValue()}"
-        }
-    }
-
-    private fun JsonElement.toGemmaToolValue(): String = when (this) {
-        JsonNull -> "null"
-        is JsonPrimitive -> {
-            val text = contentOrNull ?: toString()
-            if (isString) "${GEMMA_STRING_DELIMITER}${text.escapeGemmaString()}${GEMMA_STRING_DELIMITER}" else text
-        }
-        else -> "${GEMMA_STRING_DELIMITER}${toString().escapeGemmaString()}${GEMMA_STRING_DELIMITER}"
-    }
-
-    private fun String.escapeGemmaString(): String =
-        replace("\\", "\\\\")
-            .replace("\n", "\\n")
-            .replace("\t", "\\t")
-            .replace(GEMMA_STRING_DELIMITER, "\"")
 
     private fun JsonElement?.toPromptText(): String = when (this) {
         null, JsonNull -> ""
         is JsonPrimitive -> contentOrNull ?: toString()
-        is JsonArray -> mapNotNull { it.contentPartToText().takeIf(String::isNotBlank) }.joinToString("\n")
-        is JsonObject -> contentPartToText()
-    }
-
-    private fun JsonElement.contentPartToText(): String = when (this) {
-        is JsonPrimitive -> contentOrNull ?: toString()
-        is JsonArray -> mapNotNull { it.contentPartToText().takeIf(String::isNotBlank) }.joinToString("\n")
+        is JsonArray -> joinToString("\n") { it.toPromptText() }
         is JsonObject -> {
-            val type = this["type"]?.toPromptText()
-            val text = this["text"]?.toPromptText()
-                ?: this["input_text"]?.toPromptText()
-                ?: this["content"]?.toPromptText()
-            when {
-                !text.isNullOrBlank() -> text
-                type == "image_url" || type == "input_image" -> "[image omitted]"
-                else -> entries.joinToString(", ") { (key, value) -> "$key=${value.toPromptText()}" }
+            val text = this["text"] ?: this["input_text"] ?: this["content"]
+            if (text != null) {
+                text.toPromptText()
+            } else {
+                entries.joinToString(", ") { (key, value) -> "$key=${value.toPromptText()}" }
             }
         }
     }
-
-    private fun parseGemmaToolCalls(rawContent: String): ParsedToolCalls {
-        val matches = GEMMA_TOOL_CALL_REGEX.findAll(rawContent).toList()
-        if (matches.isEmpty()) return ParsedToolCalls(rawContent, emptyList())
-
-        val calls = matches.mapIndexedNotNull { index, match ->
-            parseGemmaToolCall(match.groupValues[1], index)
-        }
-        if (calls.isEmpty()) return ParsedToolCalls(rawContent, emptyList())
-
-        val remainingContent = GEMMA_TOOL_CALL_REGEX.replace(rawContent, "").trim()
-        DiagnosticsLogger.event("HttpApiServer", "parsed Gemma tool calls count=${calls.size}")
-        return ParsedToolCalls(content = remainingContent, toolCalls = calls)
-    }
-
-    private fun parseGemmaToolCall(body: String, index: Int): OaiToolCall? {
-        val trimmed = body.trim()
-        if (!trimmed.startsWith("call:")) return null
-        val argsStart = trimmed.indexOf('{')
-        val argsEnd = trimmed.lastIndexOf('}')
-        val nameEnd = if (argsStart >= 0) argsStart else trimmed.length
-        val name = trimmed.substring("call:".length, nameEnd).trim()
-        if (name.isEmpty()) return null
-
-        val arguments = if (argsStart >= 0 && argsEnd > argsStart) {
-            parseGemmaToolArguments(trimmed.substring(argsStart + 1, argsEnd)).toString()
-        } else {
-            "{}"
-        }
-        return OaiToolCall(
-            id = "call_${System.currentTimeMillis()}_$index",
-            function = OaiFunctionCall(name = name, arguments = arguments)
-        )
-    }
-
-    private fun parseGemmaToolArguments(rawArgs: String): JsonObject = buildJsonObject {
-        splitGemmaArguments(rawArgs).forEach { pair ->
-            val separator = pair.indexOf(':')
-            if (separator <= 0) return@forEach
-            val key = pair.substring(0, separator).trim()
-            val value = pair.substring(separator + 1).trim()
-            if (key.isNotEmpty()) put(key, parseGemmaToolValue(value))
-        }
-    }
-
-    private fun splitGemmaArguments(rawArgs: String): List<String> {
-        val parts = mutableListOf<String>()
-        var start = 0
-        var inGemmaString = false
-        var i = 0
-        while (i < rawArgs.length) {
-            if (rawArgs.startsWith(GEMMA_STRING_DELIMITER, i)) {
-                inGemmaString = !inGemmaString
-                i += GEMMA_STRING_DELIMITER.length
-                continue
-            }
-            if (!inGemmaString && rawArgs[i] == ',') {
-                parts += rawArgs.substring(start, i)
-                start = i + 1
-            }
-            i += 1
-        }
-        parts += rawArgs.substring(start)
-        return parts
-    }
-
-    private fun parseGemmaToolValue(value: String): JsonElement {
-        if (value.startsWith(GEMMA_STRING_DELIMITER) && value.endsWith(GEMMA_STRING_DELIMITER)) {
-            return JsonPrimitive(
-                value.removePrefix(GEMMA_STRING_DELIMITER)
-                    .removeSuffix(GEMMA_STRING_DELIMITER)
-                    .replace("\\n", "\n")
-                    .replace("\\t", "\t")
-            )
-        }
-        return when {
-            value.equals("true", ignoreCase = true) -> JsonPrimitive(true)
-            value.equals("false", ignoreCase = true) -> JsonPrimitive(false)
-            value.equals("null", ignoreCase = true) -> JsonNull
-            value.toLongOrNull() != null -> JsonPrimitive(value.toLong())
-            value.toDoubleOrNull() != null -> JsonPrimitive(value.toDouble())
-            else -> JsonPrimitive(value)
-        }
-    }
-
-
-    private fun GenerationUsage?.toOaiUsage(): OaiUsage? =
-        this?.let {
-            OaiUsage(
-                promptTokens = it.promptTokens,
-                completionTokens = it.completionTokens,
-                totalTokens = it.totalTokens
-            )
-        }
 
     private suspend fun ApplicationCall.requireApiToken(): Boolean {
-        if (request.authorization() == "Bearer $apiToken") {
-            return true
-        }
-        respond(
-            HttpStatusCode.Unauthorized,
-            ErrorResponse(error = "Missing or invalid bearer token", code = 401)
+        val authorization = request.headers[HttpHeaders.Authorization]
+        val fields = authorization?.trim()?.split(Regex("\\s+"), limit = 2)
+        val valid = fields != null &&
+            fields.size == 2 &&
+            fields[0].equals("Bearer", ignoreCase = true) &&
+            secureEquals(fields[1], apiToken)
+        if (valid) return true
+
+        response.headers.append(HttpHeaders.WWWAuthenticate, "Bearer")
+        respondError(
+            status = HttpStatusCode.Unauthorized,
+            message = "Missing or invalid bearer token",
+            type = "authentication_error",
+            code = "invalid_api_key"
         )
         return false
     }
 
+    private suspend fun ApplicationCall.respondError(
+        status: HttpStatusCode,
+        message: String,
+        type: String = "invalid_request_error",
+        param: String? = null,
+        code: String? = null
+    ) {
+        respond(
+            status,
+            OaiErrorResponse(
+                error = OaiError(
+                    message = message,
+                    type = type,
+                    param = param,
+                    code = code
+                )
+            )
+        )
+    }
+
+    private fun secureEquals(left: String, right: String): Boolean {
+        if (left.isEmpty() || right.isEmpty()) return false
+        return MessageDigest.isEqual(
+            left.toByteArray(StandardCharsets.UTF_8),
+            right.toByteArray(StandardCharsets.UTF_8)
+        )
+    }
+
+    private fun GenerationUsage.toOaiUsage(): OaiUsage = OaiUsage(
+        promptTokens = promptTokens,
+        completionTokens = completionTokens,
+        totalTokens = totalTokens
+    )
+
+    private fun requestId(): String = "chatcmpl-${UUID.randomUUID()}"
+    private fun toolCallId(): String = "call_${UUID.randomUUID().toString().replace("-", "")}"
+
+    private data class ParsedToolCall(
+        val name: String,
+        val arguments: String,
+    )
+
     fun stop() {
-        DiagnosticsLogger.event("HttpApiServer", "Stopping server on port=$port")
-        server?.stop(1000, 5000)
+        val active = server ?: return
         server = null
+        port = 0
+        active.stop(1000, 5000)
+    }
+
+    private companion object {
+        const val DEFAULT_TEMPERATURE = 0.7
+        const val TOOL_CALL_MARKER = "<tool_call>"
     }
 }

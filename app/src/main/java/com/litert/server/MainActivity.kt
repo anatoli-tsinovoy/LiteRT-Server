@@ -1,553 +1,546 @@
 package com.litert.server
 
-import android.Manifest
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.net.Uri
-import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
-import android.provider.OpenableColumns
-import android.widget.Toast
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
+import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Api
-import androidx.compose.material.icons.filled.Chat
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.lifecycleScope
-import com.litert.server.DiagnosticsLogger
-import com.litert.server.data.*
 import com.litert.server.download.ModelArtifact
-import com.litert.server.download.ModelDescriptor
-import com.litert.server.download.ModelDownloadManager
 import com.litert.server.service.LLMForegroundService
-import com.litert.server.ui.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.onCompletion
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
+
+private val LightColorScheme = lightColorScheme(
+    primary = Color(0xFF356A2C),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFB6F39E),
+    onPrimaryContainer = Color(0xFF082100),
+    secondary = Color(0xFF52634D),
+    tertiary = Color(0xFF386568),
+    background = Color(0xFFF7FAF5),
+    onBackground = Color(0xFF191D17),
+    surface = Color(0xFFFBFDF8),
+    onSurface = Color(0xFF191D17),
+    surfaceVariant = Color(0xFFDFE4DB),
+    onSurfaceVariant = Color(0xFF43483F),
+    outline = Color(0xFF74796F),
+    error = Color(0xFFBA1A1A),
+)
+
+private val DarkColorScheme = darkColorScheme(
+    primary = Color(0xFFA6D68A),
+    onPrimary = Color(0xFF173810),
+    primaryContainer = Color(0xFF24501B),
+    onPrimaryContainer = Color(0xFFB7F59F),
+    secondary = Color(0xFFB9CCB3),
+    tertiary = Color(0xFFA0CFD2),
+    background = Color(0xFF101310),
+    onBackground = Color(0xFFE1E4DD),
+    surface = Color(0xFF1B1E1B),
+    onSurface = Color(0xFFE1E4DD),
+    surfaceVariant = Color(0xFF292E29),
+    onSurfaceVariant = Color(0xFFC2C8BD),
+    outline = Color(0xFF8C9388),
+    error = Color(0xFFFFB4AB),
+)
 
 class MainActivity : ComponentActivity() {
-
-    private lateinit var downloadManager: ModelDownloadManager
-    private var appState by mutableStateOf(AppState())
-    private var chatMessages = mutableStateListOf<ChatMessage>()
-    private var isGenerating by mutableStateOf(false)
-    private var visionResult by mutableStateOf("")
-    private var isAnalyzing by mutableStateOf(false)
-    private var selectedTab by mutableIntStateOf(0)
-    private var availableModels by mutableStateOf(emptyList<ModelDescriptor>())
-    private var installedModels by mutableStateOf(emptyList<ModelArtifact>())
-    private var selectedModel by mutableStateOf<com.litert.server.download.ModelDescriptor?>(null)
-    private var hasHuggingFaceToken by mutableStateOf(false)
-
-    // Holds reference to the engine once the service boots it.
-    // We bind to the service via a shared singleton so the UI can call it directly.
-    private var liteRTEngine: com.litert.server.engine.LiteRTEngine? = null
-
-    // ── File picker ───────────────────────────────────────────────────────
-    private val pickFileLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri == null) return@registerForActivityResult
-        appState = appState.copy(status = AppStatus.INITIALIZING)
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val displayName = displayNameFor(uri)
-                val inputStream = contentResolver.openInputStream(uri)
-                    ?: throw Exception("Cannot open file")
-                val model = downloadManager.importLocalModel(displayName, inputStream)
-                withContext(Dispatchers.Main) {
-                    stopEngineService()
-                    refreshModels()
-                    selectedModel = model
-                    startEngineService()
-                }
-            } catch (e: Exception) {
-                DiagnosticsLogger.error("MainActivity", "Model import failed", e)
-                withContext(Dispatchers.Main) {
-                    appState = appState.copy(
-                        status = AppStatus.DOWNLOAD_ERROR,
-                        errorMessage = "Failed to copy file: ${e.message}"
-                    )
-                }
-            }
-        }
-    }
-
-    private val engineReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                LLMForegroundService.ACTION_ENGINE_READY -> {
-                    DiagnosticsLogger.event("MainActivity", "ENGINE_READY received")
-                    val port = intent.getIntExtra(LLMForegroundService.EXTRA_SERVER_PORT, 8080)
-                    val isGpu = intent.getBooleanExtra(LLMForegroundService.EXTRA_IS_GPU, true)
-                    val apiToken = intent.getStringExtra(LLMForegroundService.EXTRA_API_TOKEN).orEmpty()
-                    // Grab the engine reference from the service singleton
-                    liteRTEngine = LLMForegroundService.engineInstance
-                    appState = appState.copy(
-                        status = AppStatus.READY,
-                        isServerRunning = true,
-                        serverPort = port,
-                        isGpuBackend = isGpu,
-                        engineReady = true,
-                        apiToken = apiToken
-                    )
-                }
-                LLMForegroundService.ACTION_ENGINE_ERROR -> {
-                    val msg = intent.getStringExtra(LLMForegroundService.EXTRA_ERROR_MESSAGE)
-                    DiagnosticsLogger.error("MainActivity", "ENGINE_ERROR received: ${msg ?: "missing message"}")
-                    appState = appState.copy(status = AppStatus.ERROR, errorMessage = msg)
-                }
-            }
-        }
-    }
-
-    private val notificationPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { /* handle result */ }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        DiagnosticsLogger.initialize(applicationContext)
-        DiagnosticsLogger.event("MainActivity", "onCreate")
-
-        downloadManager = ModelDownloadManager(this)
-        refreshModels()
-
-        val filter = IntentFilter().apply {
-            addAction(LLMForegroundService.ACTION_ENGINE_READY)
-            addAction(LLMForegroundService.ACTION_ENGINE_ERROR)
-        }
-        registerReceiver(engineReceiver, filter, RECEIVER_NOT_EXPORTED)
-
-        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-
-        val pm = getSystemService(PowerManager::class.java)
-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            })
-        }
-
-        checkModelAndUpdateState()
-
+        LLMForegroundService.refresh(applicationContext)
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                AppContent()
+            MaterialTheme(
+                colorScheme = if (isSystemInDarkTheme()) DarkColorScheme else LightColorScheme
+            ) {
+                ServerScreen()
             }
         }
     }
+}
 
-    @Composable
-    fun AppContent() {
-        MainTabLayout()
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ServerScreen() {
+    val snapshot by LLMForegroundService.state.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var directUrl by rememberSaveable { mutableStateOf("") }
+    var nativeTokens by rememberSaveable { mutableStateOf("") }
+    var useGpu by remember { mutableStateOf(snapshot.useGpu) }
+    var modelMenuExpanded by remember { mutableStateOf(false) }
+
+    val activeArtifact = snapshot.models.firstOrNull { it.model.id == snapshot.activeModelId }
+        ?: snapshot.models.firstOrNull()
+    val activeModel = activeArtifact?.model
+    val statusName = snapshot.status.name
+    val isDownloading = statusName == "DOWNLOADING"
+    val isInitializing = statusName == "INITIALIZING"
+    val isRunning = statusName == "RUNNING"
+    val isBusy = isDownloading || isInitializing
+    val canChangeModel = !isBusy && !isRunning
+    val isInstalled = activeArtifact?.isInstalled == true
+    val validNativeTokens = nativeTokens.toIntOrNull()
+    val endpoint = "http://127.0.0.1:${snapshot.serverPort ?: 8080}"
+    val modelId = activeModel?.id ?: snapshot.activeModelId ?: "qwen3-0.6b"
+    val apiToken = snapshot.apiToken
+
+    LaunchedEffect(snapshot.useGpu) {
+        useGpu = snapshot.useGpu
+    }
+    LaunchedEffect(activeModel?.id, activeModel?.nativeMaxTokens) {
+        nativeTokens = activeModel?.nativeMaxTokens?.toString().orEmpty()
     }
 
-    @Composable
-    fun MainTabLayout() {
-        val tabs = listOf("Models", "Chat", "Vision", "Server", "Settings")
-        val icons = listOf(
-            Icons.Default.Download,
-            Icons.Default.Chat,
-            Icons.Default.Image,
-            Icons.Default.Api,
-            Icons.Default.Settings
-        )
-        Scaffold(
-            containerColor = DarkBackground,
-            bottomBar = {
-                NavigationBar(containerColor = SurfaceColor) {
-                    tabs.forEachIndexed { index, tab ->
-                        NavigationBarItem(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            icon = { Icon(icons[index], contentDescription = tab) },
-                            label = { Text(tab, color = if (selectedTab == index) GreenPrimary else Color.Gray) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = GreenPrimary,
-                                unselectedIconColor = Color.Gray,
-                                indicatorColor = Color(0xFF1A3A1A)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("LiteRT Server", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Local OpenAI-compatible endpoint",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                actions = { StatusPill(statusName) }
+            )
+        }
+    ) { insets ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(insets)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            SectionCard("Model") {
+                if (snapshot.models.isEmpty()) {
+                    Text(
+                        "Loading model catalog…",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { modelMenuExpanded = true },
+                            enabled = canChangeModel,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                activeModel?.displayName ?: "Choose a model",
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
+                            Text(if (modelMenuExpanded) "▲" else "▼")
+                        }
+                        DropdownMenu(
+                            expanded = modelMenuExpanded,
+                            onDismissRequest = { modelMenuExpanded = false },
+                            modifier = Modifier.fillMaxWidth(0.92f)
+                        ) {
+                            snapshot.models.forEach { artifact ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(artifact.model.displayName)
+                                            Text(
+                                                modelAvailability(artifact),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        modelMenuExpanded = false
+                                        if (canChangeModel) {
+                                            LLMForegroundService.selectModel(context, artifact.model.id)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    activeModel?.let { model ->
+                        Text(
+                            model.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "${model.filename} · context ${model.contextWindowTokens} tokens",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             }
-        ) { padding ->
-            Box(modifier = Modifier.padding(padding)) {
-                when (selectedTab) {
-                    0 -> DownloadScreen(
-                        status = appState.status,
-                        progressPercent = appState.downloadProgress,
-                        downloadedMb = appState.downloadedMb,
-                        totalMb = appState.totalMb,
-                        speedMbps = appState.downloadSpeedMbps,
-                        etaSeconds = appState.etaSeconds,
-                        errorMessage = appState.errorMessage,
-                        availableModels = availableModels,
-                        installedModelIds = installedModels.mapTo(mutableSetOf()) { it.model.id },
-                        selectedModel = selectedModel ?: downloadManager.getActiveModel(),
-                        onModelSelected = ::selectModel,
-                        onAddHuggingFaceModel = ::addHuggingFaceModel,
-                        onNativeMaxTokensSaved = ::saveNativeMaxTokens,
-                        hasHuggingFaceToken = hasHuggingFaceToken,
-                        onSaveHuggingFaceToken = ::saveHuggingFaceToken,
-                        onClearHuggingFaceToken = ::clearHuggingFaceToken,
-                        onDownload = ::startDownload,
-                        onRetry = { if (appState.status == AppStatus.ERROR) startEngineService() else startDownload() },
-                        onPickFile = { pickFileLauncher.launch(arrayOf("*/*")) }
+
+            SectionCard("Download") {
+                OutlinedTextField(
+                    value = directUrl,
+                    onValueChange = { directUrl = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = canChangeModel,
+                    singleLine = true,
+                    label = { Text("Direct Hugging Face .litertlm URL") },
+                    placeholder = { Text("https://huggingface.co/.../*.litertlm") },
+                    supportingText = {
+                        Text("Use a direct https://huggingface.co/.../resolve/... URL; repository pages are not downloadable.")
+                    }
+                )
+                Button(
+                    onClick = {
+                        LLMForegroundService.addAndDownload(context, directUrl.trim())
+                        directUrl = ""
+                    },
+                    enabled = directUrl.trim().isNotEmpty() && canChangeModel,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Add and download model")
+                }
+
+                snapshot.download?.let { progress ->
+                    Spacer(Modifier.height(2.dp))
+                    LinearProgressIndicator(
+                        progress = { progress.progressPercent.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    1 -> ChatScreen(
-                        messages = chatMessages,
-                        isGenerating = isGenerating,
-                        onSend = ::sendMessage,
-                        onClear = { chatMessages.clear() }
+                    Text(
+                        "${(progress.progressPercent * 100).toInt()}% · ${formatMegabytes(progress.downloadedMb)} / ${formatMegabytes(progress.totalMb)}",
+                        style = MaterialTheme.typography.bodySmall
                     )
-                    2 -> VisionScreen(
-                        isAnalyzing = isAnalyzing,
-                        analysisResult = visionResult,
-                        onAnalyze = ::analyzeImage,
-                        onShare = {
-                            val clipboard = getSystemService(android.content.ClipboardManager::class.java)
-                            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("result", it))
-                            Toast.makeText(this@MainActivity, "Copied!", Toast.LENGTH_SHORT).show()
-                        }
+                    Text(
+                        "${formatMegabytes(progress.speedMbps)} MB/s · ETA ${progress.etaSeconds}s",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    3 -> ServerScreen(
-                        isRunning = appState.isServerRunning,
-                        port = appState.serverPort,
-                        apiToken = appState.apiToken,
-                        requestLog = appState.requestLog,
-                        onToggle = ::toggleServer
-                    )
-                    4 -> SettingsScreen(
-                        selectedModel = selectedModel ?: downloadManager.getActiveModel(),
-                        installedModels = installedModels,
-                        isGpu = appState.isGpuBackend,
-                        hasHuggingFaceToken = hasHuggingFaceToken,
-                        onSelectModel = ::selectModel,
-                        onDeleteModel = ::deleteModel,
-                        onDeleteAllModels = ::deleteAllModels,
-                        onSaveHuggingFaceToken = ::saveHuggingFaceToken,
-                        onClearHuggingFaceToken = ::clearHuggingFaceToken,
-                        onCopyDiagnostics = ::copyDiagnostics,
-                        onClearDiagnostics = ::clearDiagnostics
+                }
+                if (isDownloading) {
+                    OutlinedButton(
+                        onClick = { LLMForegroundService.cancelDownload(context) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Cancel download")
+                    }
+                } else if (activeModel != null && !isInstalled && !isRunning && !isInitializing) {
+                    Button(
+                        onClick = { LLMForegroundService.downloadSelected(context) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Download ${activeModel.displayName}")
+                    }
+                } else if (activeArtifact != null && isInstalled) {
+                    Text(
+                        "Installed · ${formatBytes(activeArtifact.installedBytes)}",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
             }
+
+            SectionCard("Runtime configuration") {
+                Text(
+                    "Native token memory limit",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                OutlinedTextField(
+                    value = nativeTokens,
+                    onValueChange = { nativeTokens = it.filter(Char::isDigit).take(6) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = activeModel != null && canChangeModel,
+                    singleLine = true,
+                    label = { Text("Native max tokens") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    supportingText = {
+                        Text("Higher values use more native memory; maximum is the model context window.")
+                    }
+                )
+                Button(
+                    onClick = {
+                        activeModel?.let { model ->
+                            validNativeTokens?.let { value ->
+                                LLMForegroundService.setNativeMaxTokens(context, model.id, value)
+                            }
+                        }
+                    },
+                    enabled = activeModel != null && validNativeTokens != null && canChangeModel,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Save token limit")
+                }
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Prefer GPU", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Applied the next time you start the server.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = useGpu,
+                        onCheckedChange = { useGpu = it },
+                        enabled = !isRunning && !isInitializing
+                    )
+                }
+            }
+
+            SectionCard("Server control") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(statusLabel(statusName), fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (isRunning) "Listening only on 127.0.0.1"
+                            else "Start explicitly after the model is installed.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        snapshot.backend?.let { backend ->
+                            Text(
+                                "Backend: $backend",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        snapshot.backendError?.let { backendError ->
+                            Text(
+                                "GPU fallback: $backendError",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                    if (isInitializing) {
+                        LinearProgressIndicator(modifier = Modifier.width(72.dp))
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { LLMForegroundService.startServer(context, useGpu) },
+                        enabled = isInstalled && !isBusy && !isRunning,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Start")
+                    }
+                    OutlinedButton(
+                        onClick = { LLMForegroundService.stopServer(context) },
+                        enabled = isRunning || isInitializing,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Stop")
+                    }
+                }
+            }
+
+            if (!snapshot.error.isNullOrBlank()) {
+                SectionCard("Error") {
+                    Text(
+                        snapshot.error!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+
+            SectionCard("Connection") {
+                CopyableValue("Endpoint", endpoint, context)
+                CopyableValue("Model", modelId, context)
+                CopyableValue(
+                    "API token",
+                    apiToken.ifBlank { "Start the server to load the token" },
+                    context,
+                    enabled = apiToken.isNotBlank()
+                )
+                CopyableValue(
+                    "curl",
+                    curlCommand(endpoint, modelId, apiToken),
+                    context,
+                    monospace = true
+                )
+                Text(
+                    "The API is localhost-only. Use the bearer token for /v1/models and /v1/chat/completions.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
         }
     }
+}
 
-    // ── Chat ─────────────────────────────────────────────────────────────
-    private fun sendMessage(text: String) {
-        val engine = liteRTEngine
-        if (engine == null || !engine.isReady) {
-            Toast.makeText(this, "Engine not ready", Toast.LENGTH_SHORT).show()
-            return
+@Composable
+private fun SectionCard(
+    title: String,
+    content: @Composable () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = MaterialTheme.shapes.large
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            content()
         }
+    }
+}
 
-        val userMsg = ChatMessage(role = MessageRole.USER, content = text)
-        chatMessages.add(userMsg)
-        val prompt = buildChatPrompt(chatMessages)
-
-        // Placeholder assistant bubble that streams tokens in
-        val assistantMsg = ChatMessage(
-            role = MessageRole.ASSISTANT,
-            content = "",
-            isStreaming = true
+@Composable
+private fun StatusPill(statusName: String) {
+    val color = statusColor(statusName)
+    Surface(
+        color = color.copy(alpha = 0.18f),
+        contentColor = color,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.padding(end = 12.dp)
+    ) {
+        Text(
+            statusLabel(statusName),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold
         )
-        chatMessages.add(assistantMsg)
-        val assistantIndex = chatMessages.lastIndex
-        isGenerating = true
+    }
+}
 
-        lifecycleScope.launch {
-            try {
-                engine.generateText(prompt)
-                    .onCompletion { err ->
-                        isGenerating = false
-                        chatMessages[assistantIndex] =
-                            chatMessages[assistantIndex].copy(isStreaming = false)
-                        if (err != null) {
-                            chatMessages[assistantIndex] =
-                                chatMessages[assistantIndex].copy(content = "Error: ${err.message}")
-                        }
-                    }
-                    .collect { token ->
-                        chatMessages[assistantIndex] = chatMessages[assistantIndex].copy(
-                            content = chatMessages[assistantIndex].content + token
-                        )
-                    }
-            } catch (e: Exception) {
-                DiagnosticsLogger.error("MainActivity", "Chat generation failed", e)
-                isGenerating = false
-                chatMessages[assistantIndex] =
-                    chatMessages[assistantIndex].copy(
-                        content = "Error: ${e.message}",
-                        isStreaming = false
-                    )
+@Composable
+private fun CopyableValue(
+    label: String,
+    value: String,
+    context: Context,
+    enabled: Boolean = true,
+    monospace: Boolean = false
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(label, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            TextButton(
+                onClick = { copyToClipboard(context, label, value) },
+                enabled = enabled
+            ) {
+                Text("Copy")
             }
         }
+        Text(
+            value,
+            modifier = Modifier.fillMaxWidth(),
+            fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+            style = if (monospace) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
+            color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
+}
 
-    private fun buildChatPrompt(messages: List<ChatMessage>): String = buildString {
-        append("Continue this conversation. Answer the last user message.\n\n")
-        messages.forEach { message ->
-            if (message.content.isBlank()) return@forEach
-            when (message.role) {
-                MessageRole.USER -> append("User: ")
-                MessageRole.ASSISTANT -> append("Assistant: ")
-            }
-            append(message.content).append('\n')
-        }
-        append("Assistant: ")
-    }
+private fun copyToClipboard(context: Context, label: String, value: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+}
 
-    // ── Vision ───────────────────────────────────────────────────────────
-    private fun analyzeImage(uri: Uri, prompt: String) {
-        val engine = liteRTEngine
-        if (engine == null || !engine.isReady) {
-            Toast.makeText(this, "Engine not ready", Toast.LENGTH_SHORT).show()
-            return
-        }
+private fun modelAvailability(artifact: ModelArtifact): String = when {
+    artifact.isInstalled -> "Installed"
+    artifact.partialBytes > 0L -> "Partial download · ${formatBytes(artifact.partialBytes)}"
+    else -> "Not downloaded"
+}
 
-        isAnalyzing = true
-        visionResult = ""
+private fun statusLabel(statusName: String): String = when (statusName) {
+    "DOWNLOADING" -> "Downloading"
+    "INITIALIZING" -> "Initializing"
+    "RUNNING" -> "Running"
+    "ERROR" -> "Error"
+    else -> "Stopped"
+}
 
-        lifecycleScope.launch {
-            try {
-                // Copy URI to a temp file so LiteRT can read it as a file path
-                val tmpFile = File(cacheDir, "vision_input_${System.currentTimeMillis()}.jpg")
-                withContext(Dispatchers.IO) {
-                    contentResolver.openInputStream(uri)?.use { ins ->
-                        tmpFile.outputStream().use { out -> ins.copyTo(out) }
-                    }
-                }
+@Composable
+private fun statusColor(statusName: String): Color = when (statusName) {
+    "RUNNING" -> MaterialTheme.colorScheme.primary
+    "DOWNLOADING", "INITIALIZING" -> MaterialTheme.colorScheme.tertiary
+    "ERROR" -> MaterialTheme.colorScheme.error
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
+}
 
-                engine.analyzeImage(tmpFile.absolutePath, prompt)
-                    .onCompletion {
-                        isAnalyzing = false
-                        tmpFile.delete()
-                    }
-                    .collect { token ->
-                        visionResult += token
-                    }
-            } catch (e: Exception) {
-                DiagnosticsLogger.error("MainActivity", "Vision analysis failed", e)
-                isAnalyzing = false
-                visionResult = "Error: ${e.message}"
-            }
-        }
-    }
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> "%.2f GB".format(bytes / 1024f / 1024f / 1024f)
+    bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / 1024f / 1024f)
+    bytes >= 1024L -> "%.1f KB".format(bytes / 1024f)
+    else -> "$bytes B"
+}
 
-    // ── Lifecycle helpers ───────────────────────────────────────────────
-    private fun refreshModels() {
-        availableModels = downloadManager.getAvailableModels()
-        installedModels = downloadManager.getInstalledModels()
-        selectedModel = downloadManager.getActiveModel()
-        hasHuggingFaceToken = downloadManager.hasHuggingFaceToken()
-    }
+private fun formatMegabytes(value: Float): String = "%.1f".format(value)
 
-    private fun selectModel(model: ModelDescriptor) {
-        val changed = selectedModel?.id != model.id
-        if (changed) stopEngineService()
-        downloadManager.setModel(model)
-        refreshModels()
-        checkModelAndUpdateState()
-    }
-
-    private fun addHuggingFaceModel(input: String) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val model = downloadManager.addCustomHuggingFaceModel(input)
-                withContext(Dispatchers.Main) {
-                    stopEngineService()
-                    refreshModels()
-                    selectedModel = model
-                    appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, errorMessage = null)
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    appState = appState.copy(
-                        status = AppStatus.DOWNLOAD_ERROR,
-                        errorMessage = e.message ?: "Could not add Hugging Face model"
-                    )
-                }
-            }
-        }
-    }
-
-    private fun saveNativeMaxTokens(nativeMaxTokens: Int) {
-        val model = selectedModel ?: downloadManager.getActiveModel()
-        try {
-            val updated = downloadManager.setNativeMaxTokens(model.id, nativeMaxTokens)
-            val shouldRestart = appState.isServerRunning && downloadManager.isModelDownloaded()
-            if (shouldRestart) stopEngineService()
-            refreshModels()
-            selectedModel = updated
-            if (shouldRestart) startEngineService()
-            Toast.makeText(this, "Native token limit saved", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(this, e.message ?: "Invalid native token limit", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun deleteModel(model: ModelDescriptor) {
-        val deletingActiveModel = selectedModel?.id == model.id
-        if (deletingActiveModel) stopEngineService()
-        downloadManager.deleteModel(model.id)
-        refreshModels()
-        checkModelAndUpdateState()
-    }
-
-    private fun deleteAllModels() {
-        stopEngineService()
-        downloadManager.deleteAllModels()
-        refreshModels()
-        appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, errorMessage = null)
-    }
-
-    private fun checkModelAndUpdateState() {
-        refreshModels()
-        if (downloadManager.isModelDownloaded()) {
-            startEngineService()
-        } else {
-            appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, isServerRunning = false, engineReady = false)
-        }
-    }
-
-    private fun saveHuggingFaceToken(token: String) {
-        try {
-            downloadManager.setHuggingFaceToken(token)
-            refreshModels()
-            Toast.makeText(this, "Hugging Face token saved", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(this, e.message ?: "Invalid Hugging Face token", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun clearHuggingFaceToken() {
-        downloadManager.clearHuggingFaceToken()
-        refreshModels()
-        Toast.makeText(this, "Hugging Face token cleared", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun startDownload() {
-        appState = appState.copy(status = AppStatus.DOWNLOADING, errorMessage = null)
-        lifecycleScope.launch(Dispatchers.IO) {
-            downloadManager.downloadModel()
-                .catch { e ->
-                    DiagnosticsLogger.error("MainActivity", "Model download failed", e)
-                    withContext(Dispatchers.Main) {
-                        appState = appState.copy(
-                            status = AppStatus.DOWNLOAD_ERROR,
-                            errorMessage = e.message ?: e.javaClass.simpleName
-                        )
-                    }
-                }
-                .collect { progress ->
-                    withContext(Dispatchers.Main) {
-                        appState = appState.copy(
-                            downloadProgress = progress.progressPercent,
-                            downloadedMb = progress.downloadedMb,
-                            totalMb = progress.totalMb,
-                            downloadSpeedMbps = progress.speedMbps,
-                            etaSeconds = progress.etaSeconds
-                        )
-                        if (progress.isDone) {
-
-                            refreshModels()
-                            startEngineService()
-                        }
-                    }
-                }
-        }
-    }
-
-    private fun copyDiagnostics() {
-        val text = DiagnosticsLogger.readLog(this)
-        val clipboard = getSystemService(ClipboardManager::class.java)
-        clipboard.setPrimaryClip(ClipData.newPlainText("litert-diagnostics", text))
-        Toast.makeText(this, "Copied diagnostics log", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun clearDiagnostics() {
-        DiagnosticsLogger.clear(this)
-        Toast.makeText(this, "Diagnostics log cleared", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun startEngineService() {
-        if (!downloadManager.isModelDownloaded()) {
-            selectedTab = 0
-            appState = appState.copy(status = AppStatus.MODEL_NOT_FOUND, isServerRunning = false, engineReady = false)
-            Toast.makeText(this, "Download or import a model first", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val activeModel = downloadManager.getActiveModel()
-        DiagnosticsLogger.event("MainActivity", "Starting engine service nativeMaxTokens=${activeModel.nativeMaxTokens}")
-        appState = appState.copy(status = AppStatus.INITIALIZING)
-        val intent = Intent(this, LLMForegroundService::class.java).apply {
-            putExtra(LLMForegroundService.EXTRA_MODEL_PATH, downloadManager.getModelPath())
-            putExtra(LLMForegroundService.EXTRA_MODEL_ID, activeModel.id)
-            putExtra(LLMForegroundService.EXTRA_MODEL_DISPLAY_NAME, activeModel.displayName)
-            putExtra(LLMForegroundService.EXTRA_NATIVE_MAX_TOKENS, activeModel.nativeMaxTokens)
-            putExtra(LLMForegroundService.EXTRA_USE_GPU, true)
-        }
-        startForegroundService(intent)
-    }
-
-    private fun stopEngineService() {
-        DiagnosticsLogger.event("MainActivity", "Stopping engine service")
-        stopService(Intent(this, LLMForegroundService::class.java))
-        liteRTEngine = null
-        appState = appState.copy(isServerRunning = false, engineReady = false, apiToken = "")
-    }
-
-    private fun toggleServer() {
-        if (appState.isServerRunning) {
-            stopEngineService()
-        } else {
-            startEngineService()
-        }
-    }
-
-
-    private fun displayNameFor(uri: Uri): String {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0) {
-                    val value = cursor.getString(index)
-                    if (!value.isNullOrBlank()) return value
-                }
-            }
-        }
-        return uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { null } ?: "local-model.litertlm"
-    }
-    override fun onDestroy() {
-        unregisterReceiver(engineReceiver)
-        super.onDestroy()
-    }
+private fun curlCommand(endpoint: String, modelId: String, token: String): String {
+    val bearer = token.ifBlank { "<api-token>" }
+    return """curl "$endpoint/v1/chat/completions" \
+  -H "Authorization: Bearer $bearer" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"$modelId","messages":[{"role":"user","content":"Hello"}]}'"""
 }

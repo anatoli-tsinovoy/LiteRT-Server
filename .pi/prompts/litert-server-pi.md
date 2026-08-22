@@ -2,9 +2,9 @@
 
 Use this checklist when connecting `pi-coding-agent` to the Android LiteRT Server app.
 
-1. Start LiteRT Server on the Android device and load a downloaded `.litertlm` model.
-2. Start the HTTP server from the app's Server tab.
-3. Copy the shown bearer token.
+1. Download Qwen3 0.6B, or another compatible `.litertlm` model, in the Android app.
+2. Tap **Start** in Server control.
+3. Copy the bearer token from Connection.
 4. If Pi runs off-device, forward the active port:
 
    ```bash
@@ -20,7 +20,7 @@ Use this checklist when connecting `pi-coding-agent` to the Android LiteRT Serve
    ```
 
 6. Merge `.pi/agent/models.litert-server.example.json` into `~/.pi/agent/models.json`.
-7. Launch Pi and select `/model → litert-server → gemma-4-e2b-it` or `gemma-4-e4b-it`.
+7. Launch Pi and select `/model → litert-server → qwen3-0.6b`.
 
 Smoke-test commands:
 
@@ -34,7 +34,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $LITERT_SERVER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemma-4-e2b-it",
+    "model": "qwen3-0.6b",
     "messages": [
       {"role": "user", "content": "Say hello from LiteRT."}
     ],

@@ -10,7 +10,7 @@ LiteRT Server exposes:
 - `GET /v1/models` with `Authorization: Bearer <token>`
 - `POST /v1/chat/completions` with `Authorization: Bearer <token>`
 
-The Android service binds to `127.0.0.1` on the device and tries ports `8080`, `8081`, then `8082`. The active port and bearer token are shown in the app's Server tab.
+The Android service binds to `127.0.0.1` on the device and tries ports `8080`, `8081`, then `8082`. The active port and bearer token are shown in the app's Connection section.
 
 ## When Pi runs on a laptop or desktop
 
@@ -59,18 +59,16 @@ pi
 Then select the local provider from Pi:
 
 ```text
-/model → litert-server / gemma-4-e2b-it
+/model → litert-server / qwen3-0.6b
 ```
-
-Use `gemma-4-e4b-it` instead if that is the active downloaded model.
 
 ## Compatibility notes
 
 - The app endpoint is OpenAI Chat Completions-compatible, not the OpenAI Responses API.
 - Pi should use `api: "openai-completions"`.
 - `supportsDeveloperRole` should be disabled so Pi sends a standard `system` prompt.
-- `supportsReasoningEffort` can be enabled; LiteRT Server accepts OpenAI `reasoning_effort` values (`minimal`, `low`, `medium`, `high`) and translates them into prompt guidance.
-- The local `.litertlm` model may not be tool-call trained. Pi can connect to it, but coding-agent tool-use quality depends on the installed model. Tool results are returned to the model as `tool_result(...)` messages so it can answer instead of repeating the same call.
+- `supportsReasoningEffort` must be disabled because the endpoint does not translate that optional OpenAI field.
+- The local `.litertlm` model may not be tool-call trained. Pi can connect to it, but coding-agent tool-use quality depends on the installed model.
 
 - `supportsUsageInStreaming` can be enabled; LiteRT Server reports OpenAI-compatible `usage` fields after generation.
 - `contextWindow` and `maxTokens` must not exceed the app's selected **Native token memory limit** for the active model. The model may support a larger true context window, but LiteRT allocates native/KV-cache memory for `EngineConfig.maxNumTokens`; setting this too high can cause process-killing OOM crashes on phones.
@@ -92,12 +90,9 @@ This project includes `.pi/settings.json` with smaller local-model compaction va
 }
 ```
 
-Run `/trust` in Pi, restart Pi, and make sure your `~/.pi/agent/models.json` uses values no higher than the app's Native token memory limit. The included example is conservative:
+Run `/trust` in Pi, restart Pi, and keep `contextWindow` no higher than the app's Native token memory limit. The included Qwen3 0.6B example uses a 4096-token context and caps requested output at 512 tokens.
 
-- `gemma-4-e2b-it`: `contextWindow: 4096`, `maxTokens: 4096`
-- `gemma-4-e4b-it`: `contextWindow: 4096`, `maxTokens: 4096`
-
-If your device can initialize the model reliably at a higher native limit, raise both the app setting and Pi's model config together. Do not advertise 32K/128K to Pi unless the app initializes the same native token limit without crashing.
+If another model reliably initializes at a higher native limit, raise the app and client context settings together.
 
 If compaction still interrupts testing, temporarily disable it in `.pi/settings.json`:
 

@@ -1,98 +1,126 @@
-# LiteRT Server — Android Studio Project
+# LiteRT Server
 
-A complete native Android application in Kotlin that runs compatible `.litertlm` models
-locally on-device via Google's LiteRT-LM SDK.
+Native Android app for downloading a LiteRT-LM model and serving it through an
+authenticated, OpenAI-compatible localhost API.
 
 ## Requirements
 
-- Android Studio Ladybug (2024.2.1) or newer
-- Android SDK 35 (Android 15)
 - JDK 17
-- Target device: Android 8.0+ (API 26+) — tested on OnePlus 6 / Snapdragon 845 / Adreno 630
+- Android SDK platform 35
+- Android build tools 35.0.0 or newer
+- Android 8.0+ device
 
-## Project Structure
-
-```
-app/src/main/java/com/litert/server/
-├── MainActivity.kt              — Entry point, navigation, state management
-├── data/AppState.kt             — All data classes and app state enum
-├── download/ModelDownloadManager.kt  — HuggingFace model download with resume + progress
-├── engine/LiteRTEngine.kt       — LiteRT-LM SDK wrapper (GPU/CPU backend)
-├── service/
-│   ├── LLMForegroundService.kt  — Android foreground service (START_STICKY)
-│   └── HttpApiServer.kt         — Ktor CIO embedded HTTP server on port 8080
-└── ui/
-    ├── ChatScreen.kt            — Text chat with streaming tokens
-    ├── VisionScreen.kt          — Image + text analysis
-    ├── ServerScreen.kt          — Server control panel + request log + curl examples
-    ├── DownloadScreen.kt        — Model download UI with progress
-    └── SettingsScreen.kt        — GPU toggle, temperature, max tokens, model management
-```
-
-## Setup
-
-1. Clone / open this folder in Android Studio
-2. Let Gradle sync (it will download ~200MB of dependencies)
-3. Build and install on your device: `./gradlew installDebug`
-4. On first launch, choose a built-in LiteRT-LM model or add a compatible Hugging Face `.litertlm` URL, then download or import the model file.
-
-## HTTP API (Ktor on localhost:8080)
-
-Once the model is loaded and the server is running, copy the per-session token from the Server tab:
+Build and install:
 
 ```bash
-TOKEN="<token shown in the app>"
-
-# Health check does not require auth
-curl http://localhost:8080/health
-
-# OpenAI-compatible chat completions
-curl -N -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"local-litertlm","stream":true,"reasoning_effort":"low","messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
-
-# Legacy chat
-curl -X POST http://localhost:8080/chat \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"Hello!"}'
-
-# Vision (image analysis)
-curl -X POST http://localhost:8080/vision \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"imagePath":"/sdcard/DCIM/photo.jpg","prompt":"Describe this image"}'
-
-# Reset conversation history
-curl -X POST http://localhost:8080/reset \
-  -H "Authorization: Bearer $TOKEN"
+./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.litert.server/.MainActivity
 ```
 
-## GPU Acceleration
+## Usage
 
-The app uses the Adreno 630's OpenCL 2.0 support via LiteRT-LM's GPU backend.
-`libOpenCL.so` and `libvndksupport.so` are declared in the manifest.
-If GPU init fails, the engine automatically falls back to CPU.
+The app has one screen:
 
-## Models
+1. Select the built-in Qwen3 0.6B model, or paste a direct Hugging Face
+   `https://huggingface.co/.../resolve/.../*.litertlm` URL.
+2. Download the model. Interrupted downloads resume from the validated partial
+   file.
+3. Set the native context limit and GPU preference.
+4. Tap **Start**.
+5. Copy the endpoint, model ID, and API token from the Connection section.
 
-- **Built-ins**:
-  - Gemma 4 E2B: `https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm`
-  - Gemma 4 E4B: `https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm`
-- **Custom models**: paste a compatible Hugging Face repo URL or direct `.litertlm` URL in the Download screen.
-- **Hugging Face auth**: Download and Settings screens accept an `hf_...` access token. The app stores it encrypted with Android Keystore and sends it only to Hugging Face API/download requests.
-- **Storage**: models are stored in app-private external storage under `[ExternalFilesDir]/models/<model-id>/`.
-- **Safety/performance**: downloads authenticate to Hugging Face when a token is saved, use parallel HTTP Range segments when the resolver supports ranges, write partial data as `*.part*`, resume interrupted work, and atomically rename only after minimum-size validation.
-- **Management**: Settings lists installed models with size/path, lets you switch models, delete one model, or delete all models/cache.
+Repository pages are intentionally rejected because a repository can contain
+multiple hardware-specific LiteRT artifacts. Paste the direct `.litertlm` file
+URL instead.
 
-## Android 15 Notes
+The built-in test model is the pinned 474.61 MiB
+[`litert-community/Qwen3-0.6B`](https://huggingface.co/litert-community/Qwen3-0.6B)
+mixed INT4 artifact with a 2048-token native context. This artifact has
+published LiteRT-LM 0.13.1 OpenCL GPU results.
 
-- Foreground service type: `specialUse|dataSync` (required by API 35)
-- `POST_NOTIFICATIONS` requested at runtime
-- Battery optimization exemption requested on first launch
-- `ServiceCompat.startForeground()` used with correct type flags
+Models live in app-private external storage under
+`[ExternalFilesDir]/models/<model-id>/`.
 
-## APK Link
+## HTTP API
 
-https://drive.google.com/file/d/147EVwUyKYFmUYRys2-xXf1qiRUDXqL50/view?usp=sharing
+The server binds only to `127.0.0.1`, using the first available port from
+8080–8082. The API token is generated once and persisted by the app.
+
+```bash
+BASE_URL=http://127.0.0.1:8080
+TOKEN="<token shown in the app>"
+MODEL=qwen3-0.6b
+
+# No authentication
+curl "$BASE_URL/health"
+
+# Bearer authentication required
+curl "$BASE_URL/v1/models" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -N "$BASE_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"$MODEL\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
+```
+
+Supported routes:
+
+- `GET /health`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+
+Chat completions support JSON responses and incremental server-sent events.
+Requests are stateless. The app does not expose legacy chat, reset, vision, or
+in-app chat routes.
+
+## OMP model entry
+
+Add a provider to `~/.omp/agent/models.yml`:
+
+```yaml
+providers:
+  litert-server:
+    baseUrl: http://127.0.0.1:8080/v1
+    api: openai-completions
+    apiKey: LITERT_SERVER_TOKEN
+    authHeader: true
+    compat:
+      supportsDeveloperRole: false
+      supportsReasoningEffort: false
+      supportsUsageInStreaming: true
+      maxTokensField: max_tokens
+    models:
+      - id: qwen3-0.6b
+        name: LiteRT Qwen3 0.6B
+        reasoning: true
+        input: [text]
+        contextWindow: 2048
+        maxTokens: 512
+        cost:
+          input: 0
+          output: 0
+          cacheRead: 0
+          cacheWrite: 0
+```
+
+Then run with the token copied from the app:
+
+```bash
+export LITERT_SERVER_TOKEN="<token>"
+omp --model litert-server/qwen3-0.6b
+```
+
+## Runtime behavior
+
+- The foreground service exclusively owns downloads, the LiteRT engine, and
+  the HTTP server.
+- Engine start is explicit and idempotent across Activity recreation.
+- GPU initialization falls back to CPU when unavailable and exposes the native
+  fallback reason in the app and `/health`.
+- OpenAI function tools are returned as `tool_calls`; tool results can be sent
+  back for the next serialized model turn.
+- Server inference is serialized to protect the native engine.
+- Download and inference work run off the Android main thread.
+- Android backup is disabled; the API never binds beyond localhost.

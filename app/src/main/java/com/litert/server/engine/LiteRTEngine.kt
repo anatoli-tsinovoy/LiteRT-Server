@@ -1,28 +1,27 @@
 package com.litert.server.engine
 
 import android.content.Context
-import com.litert.server.DiagnosticsLogger
+import android.util.Log
+import com.google.ai.edge.litertlm.LogSeverity
+import java.io.File
 import com.google.ai.edge.litertlm.Backend
-import com.google.ai.edge.litertlm.Content
-import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.SamplerConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-
 data class GenerationUsage(
     val promptTokens: Int,
-    val completionTokens: Int
+    val completionTokens: Int,
 ) {
     val totalTokens: Int
         get() = promptTokens + completionTokens
@@ -32,329 +31,275 @@ class LiteRTEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "LiteRTEngine"
-        private const val MIN_EXPECTED_MODEL_BYTES = 100_000_000L
+        private const val DEFAULT_TOP_K = 40
+        private const val DEFAULT_TOP_P = 0.9
+        private val GPU_LOG_MARKERS =
+            listOf(
+                "litert",
+                "tflite",
+                "native",
+                "opencl",
+                "clgl",
+                "gpu",
+                "accelerator",
+                "adreno",
+                "delegate",
+            )
     }
 
-    private val sdkMutex = Mutex()
-    private var engine: Engine? = null
-    private var lastInitializationError: String? = null
-    private var currentBackend: String = "CPU"
-    private var currentSamplerConfig: SamplerConfig = SamplerConfig(
-        topK = 40,
-        topP = 0.9,
-        temperature = 0.7
-    )
+    private val mutex = Mutex()
+    private var nativeEngine: Engine? = null
 
     @Volatile
-    private var lastGenerationUsage: GenerationUsage? = null
+    private var ready = false
+
+    val isReady: Boolean
+        get() = ready
 
     @Volatile
-    var isReady = false
-        private set
+    private var backendName = "CPU"
+
+    val backend: String
+        get() = backendName
+
+    @Volatile
+    private var gpuFailure: String? = null
+
+    val gpuFallbackReason: String?
+        get() = gpuFailure
 
     suspend fun initialize(
         modelPath: String,
-        useGpu: Boolean = true,
-        temperature: Double = 0.7,
-        maxTokens: Int = 32_000,
-        topK: Int = 40,
-        topP: Double = 0.9
-    ): Boolean = withContext(Dispatchers.IO) {
-        sdkMutex.withLock {
-            DiagnosticsLogger.event(
-                TAG,
-                "initialize start useGpu=$useGpu maxTokens=$maxTokens topK=$topK topP=$topP temperature=$temperature"
-            )
-            closeLocked()
-            lastInitializationError = null
-            isReady = false
-
-            val modelFile = java.io.File(modelPath)
-            val modelDetails = modelFile.diagnosticSummary()
+        useGpu: Boolean,
+        maxTokens: Int,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        mutex.withLock {
             try {
-                validateModelFile(modelFile, modelDetails)
-                currentSamplerConfig = SamplerConfig(topK = topK, topP = topP, temperature = temperature)
-
+                closeEngineLocked()
+                ready = false
+                gpuFailure = null
+                enableBenchmark()
                 if (useGpu) {
-                    val gpuError = tryInitializeLocked(
-                        modelPath = modelPath,
-                        modelDetails = modelDetails,
-                        backend = Backend.GPU(),
-                        backendName = "GPU",
-                        maxTokens = maxTokens
-                    )
-                    if (gpuError == null) return@withLock true
+                    Engine.setNativeMinLogSeverity(LogSeverity.VERBOSE)
+                }
+                val backends =
+                    if (useGpu) {
+                        listOf(Backend.GPU() to "GPU", Backend.CPU() to "CPU")
+                    } else {
+                        listOf(Backend.CPU() to "CPU")
+                    }
 
-                    DiagnosticsLogger.warn(TAG, "Falling back to CPU backend after GPU initialization failure")
+                var lastFailure: Throwable? = null
+                for ((backend, name) in backends) {
+                    var candidate: Engine? = null
+                    try {
+                        candidate =
+                            Engine(
+                                EngineConfig(
+                                    modelPath = modelPath,
+                                    backend = backend,
+                                    maxNumTokens = maxTokens,
+                                    cacheDir = backendCacheDir(name),
+                                )
+                            )
+                        candidate.initialize()
+                        nativeEngine = candidate
+                        backendName = name
+                        ready = true
+                        return@withLock Result.success(Unit)
+                    } catch (error: Exception) {
+                        if (error is CancellationException) {
+                            throw error
+                        }
+                        lastFailure = error
+                        candidate?.let(::closeFailedEngine)
+                        if (name == "GPU") {
+                            val diagnostics = captureGpuDiagnostics()
+                            gpuFailure = failureSummary(error, diagnosticHint(diagnostics))
+                            Engine.setNativeMinLogSeverity(LogSeverity.INFO)
+                            Log.e(TAG, "GPU initialization failed; falling back to CPU", error)
+                            diagnostics?.let { Log.e(TAG, "GPU native diagnostics:\n$it") }
+                        }
+                    }
                 }
 
-                val cpuError = tryInitializeLocked(
-                    modelPath = modelPath,
-                    modelDetails = modelDetails,
-                    backend = Backend.CPU(),
-                    backendName = "CPU",
-                    maxTokens = maxTokens
+                ready = false
+                Result.failure(
+                    lastFailure ?: IllegalStateException("LiteRT-LM engine initialization failed")
                 )
-                if (cpuError == null) {
-                    true
-                } else {
-                    lastInitializationError = cpuError
-                    false
+            } catch (error: Exception) {
+                if (error is CancellationException) {
+                    throw error
                 }
-            } catch (t: Throwable) {
-                val diagnostic = buildInitializationDiagnostic("preflight", modelDetails, t)
-                DiagnosticsLogger.error(TAG, diagnostic, t)
-                lastInitializationError = diagnostic
-                false
+                ready = false
+                Result.failure(error)
             }
         }
     }
 
-    fun getLastInitializationError(): String? = lastInitializationError
+    suspend fun generate(
+        prompt: String,
+        temperature: Double,
+        onChunk: suspend (String) -> Unit,
+    ): GenerationUsage = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            check(ready) { "LiteRT-LM engine is not ready" }
+            val currentEngine = nativeEngine
+                ?: error("LiteRT-LM engine is not initialized")
+            check(currentEngine.isInitialized()) { "LiteRT-LM engine is not initialized" }
 
-    private fun validateModelFile(modelFile: java.io.File, modelDetails: String) {
-        if (!modelFile.isFile) {
-            throw IllegalArgumentException("Model file does not exist or is not a regular file: $modelDetails")
-        }
-        if (!modelFile.canRead()) {
-            throw IllegalArgumentException("Model file is not readable: $modelDetails")
-        }
-        if (modelFile.length() < MIN_EXPECTED_MODEL_BYTES) {
-            throw IllegalArgumentException("Model file is too small to be a valid .litertlm artifact: $modelDetails")
-        }
-    }
-
-    private fun tryInitializeLocked(
-        modelPath: String,
-        modelDetails: String,
-        backend: Backend,
-        backendName: String,
-        maxTokens: Int
-    ): String? {
-        var newEngine: Engine? = null
-        val operation = "LiteRT init backend=$backendName"
-        DiagnosticsLogger.beginOperation(operation)
-        return try {
-            DiagnosticsLogger.event(TAG, "Creating EngineConfig backend=$backendName model=$modelDetails")
-            val config = EngineConfig(
-                modelPath = modelPath,
-                backend = backend,
-                maxNumTokens = maxTokens,
-                cacheDir = context.cacheDir.absolutePath
-            )
-            newEngine = Engine(config)
-            DiagnosticsLogger.event(TAG, "Calling Engine.initialize backend=$backendName")
-            newEngine.initialize()
-            DiagnosticsLogger.event(TAG, "Engine initialized; conversations will be created per generation")
-
-            engine = newEngine
-            currentBackend = backendName
-            isReady = true
-            DiagnosticsLogger.event(TAG, "Engine initialized with $currentBackend backend for $modelDetails")
-            null
-        } catch (t: Throwable) {
-            safeClose(newEngine, "engine after failed $backendName init")
-            val diagnostic = buildInitializationDiagnostic(backendName, modelDetails, t)
-            DiagnosticsLogger.error(TAG, diagnostic, t)
-            diagnostic
-        } finally {
-            DiagnosticsLogger.endOperation(operation)
-        }
-    }
-
-    private fun java.io.File.diagnosticSummary(): String =
-        "path=$absolutePath, exists=${exists()}, isFile=$isFile, canRead=${canRead()}, " +
-            "bytes=${if (exists()) length() else 0}, usableSpace=${parentFile?.usableSpace ?: 0}, " +
-            "sdk=${android.os.Build.VERSION.SDK_INT}, device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, " +
-            "abi=${android.os.Build.SUPPORTED_ABIS.joinToString()}"
-
-    private fun buildInitializationDiagnostic(
-        backendName: String,
-        modelDetails: String,
-        throwable: Throwable
-    ): String {
-        val root = generateSequence(throwable) { it.cause }.last()
-        return "Failed to initialize LiteRT-LM engine with $backendName backend. " +
-            "Model diagnostics: $modelDetails. " +
-            "Error: ${throwable.javaClass.name}: ${throwable.message ?: "no message"}. " +
-            "Root cause: ${root.javaClass.name}: ${root.message ?: "no message"}"
-    }
-
-    private fun createNewConversation(
-        eng: Engine,
-        samplerConfig: SamplerConfig
-    ): com.google.ai.edge.litertlm.Conversation {
-        return eng.createConversation(
-            ConversationConfig(
-                systemInstruction = Contents.of(
-                    Content.Text(
-                        "You are a helpful AI assistant running locally on an Android device " +
-                            "powered by Google's Gemma LLM via LiteRT."
+            val conversation =
+                currentEngine.createConversation(
+                    ConversationConfig(
+                        samplerConfig =
+                            SamplerConfig(
+                                topK = DEFAULT_TOP_K,
+                                topP = DEFAULT_TOP_P,
+                                temperature = temperature,
+                            )
                     )
-                ),
-                samplerConfig = samplerConfig
-            )
-        )
-    }
-
-    @OptIn(ExperimentalApi::class)
-    private fun generateSingleTurnLocked(prompt: String): Flow<String> = flow {
-        val eng = ensureReady()
-        lastGenerationUsage = null
-        var completionChunks = 0
-        var completionChars = 0
-        val conv = createNewConversation(eng, currentSamplerConfig)
-        try {
-            conv.sendMessageAsync(prompt).collect { token ->
-                val text = token.toString()
-                completionChunks += 1
-                completionChars += text.length
-                emit(text)
+                )
+            var completionChars = 0
+            try {
+                conversation.sendMessageAsync(prompt).collect { message ->
+                    val text = message.toString()
+                    if (text.isNotEmpty()) {
+                        completionChars += text.length
+                        onChunk(text)
+                    }
+                }
+                usageFor(
+                    conversation = conversation,
+                    promptChars = prompt.length,
+                    completionChars = completionChars,
+                )
+            } catch (cancellation: CancellationException) {
+                cancelConversation(conversation)
+                throw cancellation
+            } finally {
+                closeConversation(conversation)
             }
-            collectGenerationUsage(
-                conv = conv,
-                promptChars = prompt.length,
-                completionChunks = completionChunks,
-                completionChars = completionChars
-            )
-        } finally {
-            safeClose(conv, "generation conversation")
         }
     }
 
+    suspend fun shutdown() {
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                closeEngineLocked()
+                ready = false
+            }
+        }
+    }
+
+    private fun closeEngineLocked() {
+        val currentEngine = nativeEngine ?: return
+        nativeEngine = null
+        ready = false
+        if (currentEngine.isInitialized()) {
+            currentEngine.close()
+        }
+    }
+
+    private fun closeFailedEngine(engine: Engine) {
+        runCatching {
+            if (engine.isInitialized()) {
+                engine.close()
+            }
+        }
+    }
+
+    private fun cancelConversation(conversation: Conversation) {
+        runCatching { conversation.cancelProcess() }
+    }
+
+    private fun closeConversation(conversation: Conversation) {
+        runCatching { conversation.close() }
+    }
+
     @OptIn(ExperimentalApi::class)
-    private fun collectGenerationUsage(
-        conv: com.google.ai.edge.litertlm.Conversation,
+    private fun enableBenchmark() {
+        ExperimentalFlags.enableBenchmark = true
+    }
+
+    @OptIn(ExperimentalApi::class)
+    private fun usageFor(
+        conversation: Conversation,
         promptChars: Int,
-        completionChunks: Int,
-        completionChars: Int
-    ) {
-        try {
-            val benchmark = conv.getBenchmarkInfo()
-            lastGenerationUsage = GenerationUsage(
+        completionChars: Int,
+    ): GenerationUsage {
+        return try {
+            val benchmark = conversation.getBenchmarkInfo()
+            GenerationUsage(
                 promptTokens = benchmark.lastPrefillTokenCount,
-                completionTokens = benchmark.lastDecodeTokenCount
+                completionTokens = benchmark.lastDecodeTokenCount,
             )
-            DiagnosticsLogger.event(
-                TAG,
-                "generation usage promptTokens=${benchmark.lastPrefillTokenCount} completionTokens=${benchmark.lastDecodeTokenCount}"
-            )
-        } catch (t: Throwable) {
-            val tokenCount = runCatching { conv.getTokenCount() }.getOrNull()
-            if (tokenCount != null && tokenCount > 0) {
-                val completionTokens = completionChunks.coerceAtLeast(estimateTokens(completionChars))
-                    .coerceAtMost(tokenCount)
-                lastGenerationUsage = GenerationUsage(
-                    promptTokens = (tokenCount - completionTokens).coerceAtLeast(0),
-                    completionTokens = completionTokens
-                )
-                DiagnosticsLogger.warn(
-                    TAG,
-                    "benchmark usage unavailable; using conversation token count total=$tokenCount completionEstimate=$completionTokens reason=${t.message ?: t.javaClass.name}"
-                )
-            } else {
-                val promptTokens = estimateTokens(promptChars)
-                val completionTokens = completionChunks.coerceAtLeast(estimateTokens(completionChars))
-                lastGenerationUsage = GenerationUsage(
-                    promptTokens = promptTokens,
-                    completionTokens = completionTokens
-                )
-                DiagnosticsLogger.warn(
-                    TAG,
-                    "benchmark and conversation token count unavailable; using character estimate promptTokens=$promptTokens completionTokens=$completionTokens reason=${t.message ?: t.javaClass.name}"
-                )
+        } catch (error: Throwable) {
+            if (error is CancellationException) {
+                throw error
             }
+            GenerationUsage(
+                promptTokens = estimateTokens(promptChars),
+                completionTokens = estimateTokens(completionChars),
+            )
         }
     }
 
+    private fun backendCacheDir(backend: String): String =
+        File(context.cacheDir, "litert/${backend.lowercase()}").apply {
+            check(isDirectory || mkdirs()) { "Unable to create LiteRT $backend cache directory" }
+        }.absolutePath
+
+    private fun captureGpuDiagnostics(): String? = runCatching {
+        val output =
+            ProcessBuilder("/system/bin/logcat", "-d", "-v", "brief", "-t", "500")
+                .redirectErrorStream(true)
+                .start()
+                .inputStream
+                .bufferedReader()
+                .use { it.readText() }
+        output.lineSequence()
+            .filter { line ->
+                GPU_LOG_MARKERS.any { marker -> line.contains(marker, ignoreCase = true) }
+            }
+            .toList()
+            .takeLast(20)
+            .joinToString("\n")
+            .trim()
+            .takeIf { it.isNotEmpty() }
+    }.getOrNull()
+
+    private fun diagnosticHint(diagnostics: String?): String? {
+        if (diagnostics == null) return null
+        return when {
+            diagnostics.contains("graph is not fully delegated", ignoreCase = true) ->
+                "The selected model is not fully supported by the LiteRT GPU delegate."
+            diagnostics.contains("Failed to load OpenCL", ignoreCase = true) ->
+                "LiteRT could not load the device OpenCL driver."
+            diagnostics.contains("Failed to create default OpenCL device", ignoreCase = true) ->
+                "LiteRT could not create an OpenCL GPU device."
+            diagnostics.contains("GPU accelerator could not be loaded", ignoreCase = true) ->
+                "LiteRT could not load its packaged GPU accelerator."
+            else ->
+                diagnostics.lineSequence()
+                    .lastOrNull { it.startsWith("E/") }
+                    ?.take(500)
+        }
+    }
+
+    private fun failureSummary(error: Throwable, diagnostics: String?): String {
+        val chain = generateSequence(error) { it.cause }
+            .mapNotNull { cause ->
+                cause.message?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                    "${cause.javaClass.simpleName}: $it"
+                }
+            }
+            .distinct()
+            .joinToString(" → ")
+            .ifBlank { error.javaClass.name }
+        return listOfNotNull(chain, diagnostics)
+            .joinToString("\n")
+            .take(4_000)
+    }
     private fun estimateTokens(chars: Int): Int =
         ((chars + 3) / 4).coerceAtLeast(0)
-
-    suspend fun generateText(prompt: String): Flow<String> = flow {
-        sdkMutex.withLock {
-            val operation = "LiteRT generation backend=$currentBackend promptChars=${prompt.length}"
-            DiagnosticsLogger.beginOperation(operation)
-            DiagnosticsLogger.event(TAG, "generateText start promptChars=${prompt.length}")
-            try {
-                generateSingleTurnLocked(prompt).collect { token ->
-                    emit(token)
-                }
-                DiagnosticsLogger.event(TAG, "generateText complete")
-            } catch (t: Throwable) {
-                DiagnosticsLogger.error(TAG, "generateText failed", t)
-                throw t
-            } finally {
-                DiagnosticsLogger.endOperation(operation)
-            }
-        }
-    }
-
-    suspend fun generateStatelessText(prompt: String): Flow<String> = flow {
-        sdkMutex.withLock {
-            val operation = "LiteRT stateless generation backend=$currentBackend promptChars=${prompt.length}"
-            DiagnosticsLogger.beginOperation(operation)
-            DiagnosticsLogger.event(TAG, "generateStatelessText start promptChars=${prompt.length}")
-            try {
-                generateSingleTurnLocked(prompt).collect { token ->
-                    emit(token)
-                }
-                DiagnosticsLogger.event(TAG, "generateStatelessText complete")
-            } catch (t: Throwable) {
-                DiagnosticsLogger.error(TAG, "generateStatelessText failed", t)
-                throw t
-            } finally {
-                DiagnosticsLogger.endOperation(operation)
-            }
-        }
-    }
-
-    fun getLastGenerationUsage(): GenerationUsage? = lastGenerationUsage
-
-    suspend fun analyzeImage(imagePath: String, prompt: String): Flow<String> {
-        throw UnsupportedOperationException(
-            "Vision is disabled for the current LiteRT-LM engine path; text-only models must not call Content.ImageFile."
-        )
-    }
-
-    fun clearHistory() {
-        DiagnosticsLogger.event(TAG, "clearHistory requested; no native conversation is retained")
-    }
-
-    fun getBackend(): String = currentBackend
-
-    fun shutdown() {
-        DiagnosticsLogger.event(TAG, "shutdown requested")
-        runBlocking(Dispatchers.IO) {
-            sdkMutex.withLock {
-                isReady = false
-                closeLocked()
-            }
-        }
-    }
-
-    private fun ensureReady(): Engine {
-        if (!isReady) throw IllegalStateException("Engine not ready")
-        return engine ?: throw IllegalStateException("Engine not initialized")
-    }
-
-    private fun closeLocked() {
-        safeClose(engine, "engine")
-        engine = null
-    }
-
-    private fun safeClose(closeable: Any?, label: String) {
-        if (closeable == null) return
-        val operation = "LiteRT close $label"
-        DiagnosticsLogger.beginOperation(operation)
-        try {
-            when (closeable) {
-                is com.google.ai.edge.litertlm.Conversation -> closeable.close()
-                is Engine -> closeable.close()
-            }
-        } catch (t: Throwable) {
-            DiagnosticsLogger.warn(TAG, "Ignoring LiteRT-LM close failure for $label", t)
-        } finally {
-            DiagnosticsLogger.endOperation(operation)
-        }
-    }
 }

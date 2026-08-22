@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Circuit traces stay inside the adaptive-icon safe zone. -->
+    <path
+        android:pathData="M35,43H27V33H23 M73,43H81V33H85 M35,65H27V75H23 M73,65H81V75H85"
+        android:strokeColor="@color/ic_launcher_foreground"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <path
+        android:fillColor="@color/ic_launcher_foreground"
+        android:pathData="M23,28A5,5 0,1 1,23,38A5,5 0,1 1,23,28 M85,28A5,5 0,1 1,85,38A5,5 0,1 1,85,28 M23,70A5,5 0,1 1,23,80A5,5 0,1 1,23,70 M85,70A5,5 0,1 1,85,80A5,5 0,1 1,85,70" />
+
+    <!-- Local inference server: a compact two-bay machine at the circuit center. -->
+    <path
+        android:fillColor="@color/ic_launcher_foreground"
+        android:pathData="M43,35H65A10,10 0,0 1,75 45V63A10,10 0,0 1,65 73H43A10,10 0,0 1,33 63V45A10,10 0,0 1,43 35Z" />
+    <path
+        android:fillColor="@color/ic_launcher_detail"
+        android:pathData="M42,44H61A3,3 0,0 1,64 47A3,3 0,0 1,61 50H42A3,3 0,0 1,39 47A3,3 0,0 1,42 44Z M42,58H61A3,3 0,0 1,64 61A3,3 0,0 1,61 64H42A3,3 0,0 1,39 61A3,3 0,0 1,42 58Z" />
+    <path
+        android:fillColor="@color/ic_launcher_detail"
+        android:pathData="M68,44A3,3 0,1 1,68,50A3,3 0,1 1,68,44 M68,58A3,3 0,1 1,68,64A3,3 0,1 1,68,58" />
+</vector>
